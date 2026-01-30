@@ -89,7 +89,8 @@ def calculate_kpis(df):
             "today": datetime.date.today(),
             "total_on_time": 0,
             "total_late": 0,
-            "on_time_rate": 0.0
+            "on_time_rate": 0.0,
+            "avg_daily_attendance": 0.0
         }
     
     # Get unique staff count
@@ -122,6 +123,14 @@ def calculate_kpis(df):
     total_signins = total_on_time + total_late
     on_time_rate = round((total_on_time / total_signins * 100), 1) if total_signins > 0 else 0.0
     
+    # Calculate average daily attendance rate
+    unique_dates = df["date"].dt.date.nunique()
+    if unique_dates > 0:
+        daily_attendance = df.groupby("date")["name"].nunique().mean()
+        avg_daily_attendance = round(daily_attendance / total_staff * 100, 1)
+    else:
+        avg_daily_attendance = 0.0
+    
     return {
         "total_staff": total_staff,
         "present_today": present_today,
@@ -130,13 +139,23 @@ def calculate_kpis(df):
         "today": today,
         "total_on_time": total_on_time,
         "total_late": total_late,
-        "on_time_rate": on_time_rate
+        "on_time_rate": on_time_rate,
+        "avg_daily_attendance": avg_daily_attendance
     }
 
-def create_punctuality_leaderboard(df):
-    """Create a leaderboard of staff ordered by punctuality (earliest average sign-in time)"""
+def create_attendance_leaderboard(df):
+    """Create a leaderboard of staff ranked by attendance and punctuality"""
     if df.empty:
         return pd.DataFrame()
+    
+    # Calculate total days, on-time days, and late days for each staff member
+    attendance_stats = df.groupby(["name", "department"]).agg({
+        "sign_in_time": "count",
+        "on_time": "sum",
+        "late": "sum"
+    }).reset_index()
+    
+    attendance_stats.columns = ["name", "department", "total_days", "on_time_days", "late_days"]
     
     # Calculate average sign-in time for each staff member
     def time_to_minutes(t):
@@ -146,45 +165,39 @@ def create_punctuality_leaderboard(df):
     
     df["sign_in_minutes"] = df["sign_in_time"].apply(time_to_minutes)
     
-    # Group by staff member and calculate statistics
-    punctuality_stats = df.groupby(["name", "department"]).agg({
-        "sign_in_minutes": ["mean", "min", "count"],
-        "late": "sum",
-        "on_time": "sum"
-    }).reset_index()
+    avg_times = df.groupby("name")["sign_in_minutes"].mean().reset_index()
+    avg_times.columns = ["name", "avg_minutes"]
     
-    # Flatten column names
-    punctuality_stats.columns = [
-        "name", "department", "avg_minutes", 
-        "earliest_time", "total_days", "late_count", "on_time_count"
-    ]
+    # Merge average times with attendance stats
+    leaderboard = pd.merge(attendance_stats, avg_times, on="name", how="left")
     
-    # Convert average minutes back to time
-    punctuality_stats["avg_signin_time"] = punctuality_stats["avg_minutes"].apply(
+    # Convert average minutes back to time string
+    leaderboard["avg_signin_time"] = leaderboard["avg_minutes"].apply(
         lambda x: f"{int(x//60):02d}:{int(x%60):02d}" if not np.isnan(x) else "N/A"
     )
     
-    # Calculate punctuality percentage
-    punctuality_stats["punctuality_percentage"] = round(
-        (punctuality_stats["on_time_count"] / punctuality_stats["total_days"]) * 100, 1
+    # Calculate on-time percentage
+    leaderboard["on_time_percentage"] = round(
+        (leaderboard["on_time_days"] / leaderboard["total_days"]) * 100, 1
     )
     
-    # Sort by average sign-in time (earliest first) then by punctuality percentage
-    punctuality_stats = punctuality_stats.sort_values(
-        by=["avg_minutes", "punctuality_percentage"], 
-        ascending=[True, False]
+    # Sort by total days descending, then by average sign-in time ascending (earlier is better)
+    leaderboard = leaderboard.sort_values(
+        by=["total_days", "avg_minutes"], 
+        ascending=[False, True]
     ).reset_index(drop=True)
     
     # Add rank
-    punctuality_stats.insert(0, "rank", range(1, len(punctuality_stats) + 1))
+    leaderboard.insert(0, "rank", range(1, len(leaderboard) + 1))
     
-    # Select and rename columns for display
+    # Select and order columns
     display_cols = [
-        "rank", "name", "department", "avg_signin_time", 
-        "punctuality_percentage", "total_days", "on_time_count", "late_count"
+        "rank", "name", "department", "total_days", 
+        "avg_signin_time", "on_time_percentage", 
+        "on_time_days", "late_days"
     ]
     
-    return punctuality_stats[display_cols]
+    return leaderboard[display_cols]
 
 def create_weekly_report(df, week_num=None):
     """Create a clean weekly report with days as columns"""
@@ -255,8 +268,8 @@ def create_weekly_report(df, week_num=None):
                 lambda row: "✅" if row[day] != "Absent" else "❌", axis=1
             )
     
-    # Sort by name
-    report_df = report_df.sort_values("name").reset_index(drop=True)
+    # Sort by total days descending
+    report_df = report_df.sort_values("total_days", ascending=False).reset_index(drop=True)
     
     return report_df
 
@@ -271,7 +284,7 @@ if uploaded_file is not None:
         
         # ================== KPI METRICS ==================
         st.markdown("### 📊 Attendance Overview")
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             st.metric(
@@ -282,10 +295,9 @@ if uploaded_file is not None:
         
         with col2:
             st.metric(
-                label="Present Today",
-                value=kpis["present_today"],
-                delta=f"Today: {kpis['today'].strftime('%b %d')}",
-                help="Staff who signed in today"
+                label="Daily Attendance",
+                value=f"{kpis['avg_daily_attendance']}%",
+                help="Average percentage of staff attending daily"
             )
         
         with col3:
@@ -298,21 +310,29 @@ if uploaded_file is not None:
         
         with col4:
             st.metric(
-                label="Avg Sign-Ins/Week",
+                label="Avg Sign-Ins/Staff",
                 value=kpis["avg_signins"],
-                help="Average number of sign-ins per staff member this week"
+                help="Average number of sign-ins per staff member"
+            )
+        
+        with col5:
+            st.metric(
+                label="Total Sign-Ins",
+                value=kpis["total_on_time"] + kpis["total_late"],
+                delta=f"{kpis['total_late']} late",
+                help="Total number of sign-ins recorded"
             )
         
         st.markdown("---")
         
-        # ================== PUNCTUALITY LEADERBOARD ==================
-        st.markdown("### 🏆 Punctuality Leaderboard")
-        st.markdown("Staff ranked by earliest average sign-in time and on-time percentage")
+        # ================== ATTENDANCE LEADERBOARD ==================
+        st.markdown("### 🏆 Attendance & Punctuality Leaderboard")
+        st.markdown("Staff ranked by **total days attended** (primary) and **average sign-in time** (secondary)")
         
-        leaderboard = create_punctuality_leaderboard(df)
+        leaderboard = create_attendance_leaderboard(df)
         
         if not leaderboard.empty:
-            # Display leaderboard with formatting
+            # Display leaderboard with progress bars for on-time percentage
             st.dataframe(
                 leaderboard,
                 use_container_width=True,
@@ -321,33 +341,73 @@ if uploaded_file is not None:
                     "rank": st.column_config.NumberColumn("Rank", width="small"),
                     "name": st.column_config.TextColumn("Employee Name", width="medium"),
                     "department": st.column_config.TextColumn("Department", width="medium"),
-                    "avg_signin_time": st.column_config.TextColumn("Avg Sign-In Time", width="small"),
-                    "punctuality_percentage": st.column_config.ProgressColumn(
+                    "total_days": st.column_config.NumberColumn(
+                        "Total Days",
+                        width="small",
+                        help="Total number of days signed in"
+                    ),
+                    "avg_signin_time": st.column_config.TextColumn(
+                        "Avg Sign-In Time", 
+                        width="small",
+                        help="Average time of sign-in across all days"
+                    ),
+                    "on_time_percentage": st.column_config.ProgressColumn(
                         "On-Time %", 
                         format="%.1f%%",
                         min_value=0,
                         max_value=100,
-                        width="medium"
+                        width="medium",
+                        help="Percentage of days signed in before 8:00 AM"
                     ),
-                    "total_days": st.column_config.NumberColumn("Total Days", width="small"),
-                    "on_time_count": st.column_config.NumberColumn("On-Time Days", width="small"),
-                    "late_count": st.column_config.NumberColumn("Late Days", width="small")
+                    "on_time_days": st.column_config.NumberColumn(
+                        "On-Time Days", 
+                        width="small",
+                        help="Number of days signed in before 8:00 AM"
+                    ),
+                    "late_days": st.column_config.NumberColumn(
+                        "Late Days", 
+                        width="small",
+                        help="Number of days signed in after 8:00 AM"
+                    )
                 }
             )
             
-            # Add some statistics about the leaderboard
-            col1, col2, col3 = st.columns(3)
+            # Add leaderboard statistics
+            st.markdown("#### 📈 Leaderboard Statistics")
+            col1, col2, col3, col4 = st.columns(4)
+            
             with col1:
-                earliest_avg = leaderboard["avg_signin_time"].iloc[0]
-                st.metric("Earliest Average", earliest_avg, help="Average sign-in time of the most punctual staff")
+                top_performer = leaderboard.iloc[0]
+                st.metric(
+                    "Top Performer", 
+                    top_performer["name"].split()[0],
+                    delta=f"{top_performer['total_days']} days",
+                    help=f"{top_performer['name']} leads with {top_performer['total_days']} days attended"
+                )
             
             with col2:
-                best_punctuality = leaderboard["punctuality_percentage"].max()
-                st.metric("Best On-Time Rate", f"{best_punctuality}%", help="Highest on-time percentage")
+                avg_days = round(leaderboard["total_days"].mean(), 1)
+                st.metric(
+                    "Avg Days/Staff", 
+                    avg_days,
+                    help="Average number of days attended per staff member"
+                )
             
             with col3:
-                avg_punctuality = round(leaderboard["punctuality_percentage"].mean(), 1)
-                st.metric("Average On-Time Rate", f"{avg_punctuality}%", help="Average on-time percentage")
+                perfect_attendance = len(leaderboard[leaderboard["late_days"] == 0])
+                st.metric(
+                    "Perfect Attendance", 
+                    perfect_attendance,
+                    help="Number of staff with zero late days"
+                )
+            
+            with col4:
+                best_punctuality = leaderboard["on_time_percentage"].max()
+                st.metric(
+                    "Best On-Time Rate", 
+                    f"{best_punctuality}%",
+                    help="Highest on-time percentage achieved"
+                )
         
         st.markdown("---")
         
@@ -413,61 +473,46 @@ if uploaded_file is not None:
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("#### 📊 Department Performance")
-                if not df.empty and "department" in df.columns:
-                    dept_stats = df.groupby("department").agg({
-                        "name": "nunique",
-                        "on_time": "sum",
-                        "late": "sum"
-                    }).reset_index()
-                    dept_stats.columns = ["Department", "Staff Count", "On-Time", "Late"]
-                    
-                    # Calculate percentages
-                    dept_stats["Total"] = dept_stats["On-Time"] + dept_stats["Late"]
-                    dept_stats["On-Time %"] = round((dept_stats["On-Time"] / dept_stats["Total"]) * 100, 1)
-                    
-                    # Sort by on-time percentage
-                    dept_stats = dept_stats.sort_values("On-Time %", ascending=False)
-                    
-                    st.dataframe(
-                        dept_stats,
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                st.markdown("#### 📊 Top 10 Most Consistent Attendees")
+                top_10 = leaderboard.head(10)[["rank", "name", "total_days", "on_time_percentage"]]
+                st.dataframe(
+                    top_10,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "rank": "Rank",
+                        "name": "Name",
+                        "total_days": "Days Attended",
+                        "on_time_percentage": st.column_config.ProgressColumn(
+                            "On-Time %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100
+                        )
+                    }
+                )
             
             with col2:
-                st.markdown("#### 📅 Daily Attendance Pattern")
-                if not df.empty:
-                    daily_pattern = df.groupby("day").agg({
-                        "sign_in_time": "count",
-                        "on_time": "sum",
-                        "late": "sum"
-                    }).reset_index()
+                st.markdown("#### 📅 Attendance Distribution")
+                # Create attendance distribution bins
+                if not leaderboard.empty:
+                    bins = [0, 2, 4, 6, 8, 10, float('inf')]
+                    labels = ["0-2 days", "3-4 days", "5-6 days", "7-8 days", "9-10 days", "10+ days"]
                     
-                    # Calculate percentages
-                    daily_pattern["On-Time %"] = round((daily_pattern["on_time"] / daily_pattern["sign_in_time"]) * 100, 1)
+                    leaderboard["attendance_range"] = pd.cut(
+                        leaderboard["total_days"], 
+                        bins=bins, 
+                        labels=labels, 
+                        right=False
+                    )
                     
-                    # Order days
-                    day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-                    daily_pattern["day"] = pd.Categorical(daily_pattern["day"], categories=day_order, ordered=True)
-                    daily_pattern = daily_pattern.sort_values("day")
+                    distribution = leaderboard["attendance_range"].value_counts().sort_index().reset_index()
+                    distribution.columns = ["Days Attended", "Number of Staff"]
                     
                     st.dataframe(
-                        daily_pattern[["day", "sign_in_time", "on_time", "late", "On-Time %"]],
+                        distribution,
                         use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "day": "Day",
-                            "sign_in_time": "Total Sign-ins",
-                            "on_time": "On-Time",
-                            "late": "Late",
-                            "On-Time %": st.column_config.ProgressColumn(
-                                "On-Time %",
-                                format="%.1f%%",
-                                min_value=0,
-                                max_value=100
-                            )
-                        }
+                        hide_index=True
                     )
     
     else:
@@ -483,9 +528,9 @@ else:
         After uploading your Excel file, you'll see:
         
         1. **📊 Attendance Overview**: Key metrics at a glance
-        2. **🏆 Punctuality Leaderboard**: Staff ranked by earliest average sign-in time
+        2. **🏆 Attendance Leaderboard**: Staff ranked by total days attended (most to least)
         3. **📅 Weekly Attendance Report**: Clean table with days as columns
-        4. **📈 Detailed Insights**: Department and daily patterns
+        4. **📈 Detailed Insights**: Top performers and attendance distribution
         
         **Expected Excel Format:**
         - File should have columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT
@@ -496,11 +541,11 @@ else:
     
     # Placeholder metrics
     st.markdown("### 📊 Attendance Overview")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
-    for col, value, label in zip([col1, col2, col3, col4], 
-                                  ["0", "0", "0%", "0.0"], 
-                                  ["Total Staff", "Present Today", "On-Time Rate", "Avg Sign-Ins/Week"]):
+    for col, value, label in zip([col1, col2, col3, col4, col5], 
+                                  ["0", "0%", "0%", "0.0", "0"], 
+                                  ["Total Staff", "Daily Attendance", "On-Time Rate", "Avg Sign-Ins/Staff", "Total Sign-Ins"]):
         with col:
             st.metric(label=label, value=value)
 
