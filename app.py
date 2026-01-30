@@ -16,18 +16,19 @@ LATE_TIME = time(8, 0)  # 8:00 AM
 
 # ================== HEADER ==================
 st.title("Staff Attendance Dashboard")
-st.markdown("Upload attendance Excel file to view comprehensive staff statistics and weekly reports.")
+st.markdown("Upload multiple attendance Excel files to view comprehensive staff statistics across all periods.")
 
 # ================== FILE UPLOAD ==================
-uploaded_file = st.file_uploader(
-    "📤 Upload Attendance Excel File",
+uploaded_files = st.file_uploader(
+    "📤 Upload Attendance Excel Files",
     type=["xlsx", "xls"],
-    help="Upload an Excel file with columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT"
+    accept_multiple_files=True,
+    help="Upload one or more Excel files with columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT"
 )
 
 # ================== FUNCTIONS ==================
-def process_excel_file(file):
-    """Process the uploaded Excel file with the specific format"""
+def process_excel_file(file, file_name=""):
+    """Process a single uploaded Excel file with the specific format"""
     try:
         # Read Excel file, skip the first row (title row)
         df = pd.read_excel(file, header=1)
@@ -65,21 +66,49 @@ def process_excel_file(file):
         # Add day of week
         df["day"] = df["date"].dt.day_name()
         
-        # Add week number
-        df["week"] = df["date"].dt.isocalendar().week
+        # Add week number and week identifier
+        df["week_num"] = df["date"].dt.isocalendar().week
+        df["week_year"] = df["date"].dt.isocalendar().year
+        df["week_identifier"] = df["week_year"].astype(str) + "-W" + df["week_num"].astype(str)
+        
+        # Add month and year for time period tracking
+        df["month"] = df["date"].dt.month
+        df["year"] = df["date"].dt.year
+        df["month_year"] = df["date"].dt.strftime("%b %Y")
         
         # Mark late arrivals (after 8:00 AM)
         df["late"] = df["sign_in_time"].apply(lambda x: x > LATE_TIME if x else False)
         df["on_time"] = ~df["late"]
         
+        # Add source file name for tracking
+        df["source_file"] = file_name
+        
         return df
     
     except Exception as e:
-        st.error(f"Error processing file: {str(e)}")
+        st.error(f"Error processing file {file_name}: {str(e)}")
         return pd.DataFrame()
 
+def combine_all_files(uploaded_files):
+    """Combine data from all uploaded files"""
+    all_data = []
+    file_names = []
+    
+    for uploaded_file in uploaded_files:
+        file_name = uploaded_file.name
+        file_names.append(file_name)
+        df = process_excel_file(uploaded_file, file_name)
+        if not df.empty:
+            all_data.append(df)
+    
+    if all_data:
+        combined_df = pd.concat(all_data, ignore_index=True)
+        return combined_df, file_names
+    else:
+        return pd.DataFrame(), file_names
+
 def calculate_kpis(df):
-    """Calculate KPI metrics from the data"""
+    """Calculate KPI metrics from the combined data"""
     if df.empty:
         return {
             "total_staff": 0,
@@ -90,7 +119,10 @@ def calculate_kpis(df):
             "total_on_time": 0,
             "total_late": 0,
             "on_time_rate": 0.0,
-            "avg_daily_attendance": 0.0
+            "avg_daily_attendance": 0.0,
+            "total_signins": 0,
+            "total_days_covered": 0,
+            "date_range": "N/A"
         }
     
     # Get unique staff count
@@ -108,14 +140,9 @@ def calculate_kpis(df):
     # Calculate absent today
     absent_today = max(0, total_staff - present_today)
     
-    # Calculate average sign-ins this week
-    current_week = today.isocalendar()[1]
-    this_week_data = df[df["week"] == current_week]
-    if not this_week_data.empty:
-        signins_by_staff = this_week_data.groupby("name")["sign_in_time"].count()
-        avg_signins = round(signins_by_staff.mean(), 1)
-    else:
-        avg_signins = 0.0
+    # Calculate average sign-ins per staff
+    signins_by_staff = df.groupby("name")["sign_in_time"].count()
+    avg_signins = round(signins_by_staff.mean(), 1)
     
     # Calculate punctuality stats
     total_on_time = df[df["on_time"]]["name"].count()
@@ -131,6 +158,12 @@ def calculate_kpis(df):
     else:
         avg_daily_attendance = 0.0
     
+    # Calculate date range
+    min_date = df["date"].min().date()
+    max_date = df["date"].max().date()
+    date_range = f"{min_date.strftime('%b %d, %Y')} to {max_date.strftime('%b %d, %Y')}"
+    total_days_covered = (max_date - min_date).days + 1
+    
     return {
         "total_staff": total_staff,
         "present_today": present_today,
@@ -140,11 +173,14 @@ def calculate_kpis(df):
         "total_on_time": total_on_time,
         "total_late": total_late,
         "on_time_rate": on_time_rate,
-        "avg_daily_attendance": avg_daily_attendance
+        "avg_daily_attendance": avg_daily_attendance,
+        "total_signins": total_signins,
+        "total_days_covered": total_days_covered,
+        "date_range": date_range
     }
 
 def create_attendance_leaderboard(df):
-    """Create a leaderboard of staff ranked by attendance and punctuality"""
+    """Create a leaderboard of staff ranked by attendance and punctuality from combined data"""
     if df.empty:
         return pd.DataFrame()
     
@@ -199,98 +235,80 @@ def create_attendance_leaderboard(df):
     
     return leaderboard[display_cols]
 
-def create_weekly_report(df, week_num=None):
-    """Create a clean weekly report with days as columns"""
+def create_time_period_report(df, period_type="week"):
+    """Create a report grouped by time period (week or month)"""
     if df.empty:
         return pd.DataFrame()
     
-    if week_num is None:
-        week_num = datetime.date.today().isocalendar()[1]
+    if period_type == "week":
+        # Group by week
+        period_col = "week_identifier"
+        period_name = "Week"
+    else:
+        # Group by month
+        period_col = "month_year"
+        period_name = "Month"
     
-    # Filter for the specific week
-    weekly_data = df[df["week"] == week_num].copy()
-    
-    if weekly_data.empty:
-        return pd.DataFrame()
-    
-    # Convert sign-in time to display format
-    weekly_data["sign_in_display"] = weekly_data["sign_in_time"].apply(
-        lambda x: x.strftime("%I:%M %p") if pd.notna(x) else "Absent"
-    )
-    
-    # Create pivot table with days as columns
-    pivot_df = weekly_data.pivot_table(
-        index="name",
-        columns="day",
-        values="sign_in_display",
-        aggfunc=lambda x: x.iloc[0] if len(x) > 0 else "Absent",
-        fill_value="Absent"
-    )
-    
-    # Calculate weekly statistics
-    weekly_stats = weekly_data.groupby("name").agg({
+    # Calculate statistics by time period
+    period_stats = df.groupby(period_col).agg({
+        "name": "nunique",
         "sign_in_time": "count",
         "on_time": "sum",
         "late": "sum"
     }).reset_index()
-    weekly_stats.columns = ["name", "total_days", "on_time_days", "late_days"]
     
-    # Calculate average sign-in time for the week
-    def avg_time_func(times):
-        valid_times = [t for t in times if pd.notna(t)]
-        if not valid_times:
-            return None
-        
-        # Convert to minutes
-        minutes = [t.hour * 60 + t.minute for t in valid_times]
-        avg_minutes = sum(minutes) / len(minutes)
-        return f"{int(avg_minutes//60):02d}:{int(avg_minutes%60):02d}"
+    period_stats.columns = [period_name, "Unique Staff", "Total Sign-Ins", "On-Time", "Late"]
     
-    avg_times = weekly_data.groupby("name")["sign_in_time"].apply(avg_time_func).reset_index()
-    avg_times.columns = ["name", "avg_time"]
+    # Calculate percentages
+    period_stats["On-Time %"] = round((period_stats["On-Time"] / period_stats["Total Sign-Ins"]) * 100, 1)
+    period_stats["Attendance Rate %"] = round((period_stats["Unique Staff"] / df["name"].nunique()) * 100, 1)
     
-    # Merge all data
-    report_df = pd.merge(pivot_df, weekly_stats, on="name", how="left")
-    report_df = pd.merge(report_df, avg_times, on="name", how="left")
+    # Sort by period
+    if period_type == "week":
+        # Sort weeks chronologically
+        period_stats[period_name] = pd.Categorical(
+            period_stats[period_name], 
+            categories=sorted(period_stats[period_name].unique(), key=lambda x: (int(x.split('-')[0]), int(x.split('-W')[1]))),
+            ordered=True
+        )
+    else:
+        # Sort months chronologically
+        period_stats["sort_date"] = pd.to_datetime(period_stats[period_name], format="%b %Y")
+        period_stats = period_stats.sort_values("sort_date")
+        period_stats = period_stats.drop("sort_date", axis=1)
     
-    # Reorder columns for better presentation
-    day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    existing_days = [day for day in day_order if day in report_df.columns]
+    period_stats = period_stats.sort_values(period_name).reset_index(drop=True)
     
-    # Create final column order
-    final_cols = ["name"] + existing_days + ["avg_time", "total_days", "on_time_days", "late_days"]
-    report_df = report_df[final_cols]
-    
-    # Add emoji indicators for days
-    for day in existing_days:
-        if day in report_df.columns:
-            report_df[f"{day}_icon"] = report_df.apply(
-                lambda row: "✅" if row[day] != "Absent" else "❌", axis=1
-            )
-    
-    # Sort by total days descending
-    report_df = report_df.sort_values("total_days", ascending=False).reset_index(drop=True)
-    
-    return report_df
+    return period_stats
 
 # ================== MAIN ==================
-if uploaded_file is not None:
-    # Process the uploaded file
-    df = process_excel_file(uploaded_file)
+if uploaded_files:
+    # Process all uploaded files
+    with st.spinner("Processing uploaded files..."):
+        df, file_names = combine_all_files(uploaded_files)
     
     if not df.empty:
-        # Calculate KPIs
+        # File upload summary
+        st.success(f"✅ Successfully processed {len(file_names)} file(s)")
+        
+        with st.expander("📁 View Uploaded Files"):
+            for i, file_name in enumerate(file_names, 1):
+                st.write(f"{i}. {file_name}")
+        
+        # Calculate KPIs from combined data
         kpis = calculate_kpis(df)
         
         # ================== KPI METRICS ==================
-        st.markdown("### 📊 Attendance Overview")
+        st.markdown("### 📊 Combined Attendance Overview")
+        st.caption(f"Data Range: {kpis['date_range']} ({kpis['total_days_covered']} days)")
+        
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             st.metric(
                 label="Total Staff",
                 value=kpis["total_staff"],
-                help="Number of unique staff members in the data"
+                help="Number of unique staff members across all files"
             )
         
         with col2:
@@ -304,7 +322,7 @@ if uploaded_file is not None:
             st.metric(
                 label="On-Time Rate",
                 value=f"{kpis['on_time_rate']}%",
-                delta=f"{kpis['total_on_time']} on-time sign-ins",
+                delta=f"{kpis['total_on_time']:,} on-time",
                 help="Percentage of sign-ins before 8:00 AM"
             )
         
@@ -318,16 +336,16 @@ if uploaded_file is not None:
         with col5:
             st.metric(
                 label="Total Sign-Ins",
-                value=kpis["total_on_time"] + kpis["total_late"],
-                delta=f"{kpis['total_late']} late",
-                help="Total number of sign-ins recorded"
+                value=f"{kpis['total_signins']:,}",
+                delta=f"{kpis['total_late']:,} late",
+                help="Total number of sign-ins across all periods"
             )
         
         st.markdown("---")
         
         # ================== ATTENDANCE LEADERBOARD ==================
-        st.markdown("### 🏆 Attendance & Punctuality Leaderboard")
-        st.markdown("Staff ranked by **total days attended** (primary) and **average sign-in time** (secondary)")
+        st.markdown("### 🏆 Combined Attendance & Punctuality Leaderboard")
+        st.markdown(f"**Based on {kpis['total_days_covered']} days of data across all uploaded files**")
         
         leaderboard = create_attendance_leaderboard(df)
         
@@ -344,12 +362,12 @@ if uploaded_file is not None:
                     "total_days": st.column_config.NumberColumn(
                         "Total Days",
                         width="small",
-                        help="Total number of days signed in"
+                        help="Total number of days signed in across all files"
                     ),
                     "avg_signin_time": st.column_config.TextColumn(
                         "Avg Sign-In Time", 
                         width="small",
-                        help="Average time of sign-in across all days"
+                        help="Average time of sign-in across all days and files"
                     ),
                     "on_time_percentage": st.column_config.ProgressColumn(
                         "On-Time %", 
@@ -373,7 +391,7 @@ if uploaded_file is not None:
             )
             
             # Add leaderboard statistics
-            st.markdown("#### 📈 Leaderboard Statistics")
+            st.markdown("#### 📈 Combined Leaderboard Statistics")
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
@@ -382,7 +400,7 @@ if uploaded_file is not None:
                     "Top Performer", 
                     top_performer["name"].split()[0],
                     delta=f"{top_performer['total_days']} days",
-                    help=f"{top_performer['name']} leads with {top_performer['total_days']} days attended"
+                    help=f"{top_performer['name']} leads with {top_performer['total_days']} total days attended"
                 )
             
             with col2:
@@ -411,69 +429,81 @@ if uploaded_file is not None:
         
         st.markdown("---")
         
-        # ================== WEEKLY REPORT ==================
-        st.markdown("### 📅 Weekly Attendance Report")
+        # ================== TIME PERIOD ANALYSIS ==================
+        st.markdown("### 📅 Time Period Analysis")
         
-        # Week selector
-        weeks = sorted(df["week"].unique())
-        current_week = datetime.date.today().isocalendar()[1]
+        tab1, tab2 = st.tabs(["Weekly Analysis", "Monthly Analysis"])
         
-        if weeks:
-            col1, col2 = st.columns([1, 3])
-            with col1:
-                selected_week = st.selectbox(
-                    "Select Week:",
-                    options=weeks,
-                    index=weeks.index(current_week) if current_week in weeks else 0,
-                    format_func=lambda x: f"Week {x}"
-                )
-            
-            # Generate weekly report
-            weekly_report = create_weekly_report(df, selected_week)
+        with tab1:
+            st.markdown("#### 📊 Weekly Attendance Trends")
+            weekly_report = create_time_period_report(df, period_type="week")
             
             if not weekly_report.empty:
-                # Get just the display columns (without the icon columns)
-                display_cols = [col for col in weekly_report.columns if not col.endswith('_icon')]
-                display_df = weekly_report[display_cols].copy()
-                
-                # Rename columns for better display
-                rename_dict = {
-                    "name": "Employee Name",
-                    "avg_time": "Avg Time",
-                    "total_days": "Days",
-                    "on_time_days": "On-Time",
-                    "late_days": "Late"
-                }
-                display_df = display_df.rename(columns=rename_dict)
-                
-                # Display the table
                 st.dataframe(
-                    display_df,
+                    weekly_report,
                     use_container_width=True,
-                    hide_index=True
+                    hide_index=True,
+                    column_config={
+                        "Week": st.column_config.TextColumn("Week", width="small"),
+                        "Unique Staff": st.column_config.NumberColumn("Staff Count", width="small"),
+                        "Total Sign-Ins": st.column_config.NumberColumn("Total Sign-Ins", width="small"),
+                        "On-Time": st.column_config.NumberColumn("On-Time", width="small"),
+                        "Late": st.column_config.NumberColumn("Late", width="small"),
+                        "On-Time %": st.column_config.ProgressColumn(
+                            "On-Time %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100,
+                            width="medium"
+                        ),
+                        "Attendance Rate %": st.column_config.ProgressColumn(
+                            "Attendance %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100,
+                            width="medium"
+                        )
+                    }
                 )
-                
-                # Show summary
-                total_employees = len(weekly_report)
-                total_days_present = weekly_report["total_days"].sum()
-                avg_days_per_employee = round(weekly_report["total_days"].mean(), 1)
-                
-                st.caption(f"""
-                **Summary for Week {selected_week}:** 
-                {total_employees} employees | {total_days_present} total sign-ins | 
-                {avg_days_per_employee} average days per employee
-                """)
-            else:
-                st.warning(f"No attendance data available for Week {selected_week}")
-        else:
-            st.info("No weekly data available in the uploaded file.")
+        
+        with tab2:
+            st.markdown("#### 📊 Monthly Attendance Trends")
+            monthly_report = create_time_period_report(df, period_type="month")
+            
+            if not monthly_report.empty:
+                st.dataframe(
+                    monthly_report,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Month": st.column_config.TextColumn("Month", width="small"),
+                        "Unique Staff": st.column_config.NumberColumn("Staff Count", width="small"),
+                        "Total Sign-Ins": st.column_config.NumberColumn("Total Sign-Ins", width="small"),
+                        "On-Time": st.column_config.NumberColumn("On-Time", width="small"),
+                        "Late": st.column_config.NumberColumn("Late", width="small"),
+                        "On-Time %": st.column_config.ProgressColumn(
+                            "On-Time %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100,
+                            width="medium"
+                        ),
+                        "Attendance Rate %": st.column_config.ProgressColumn(
+                            "Attendance %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100,
+                            width="medium"
+                        )
+                    }
+                )
         
         # ================== ADDITIONAL INSIGHTS ==================
         with st.expander("📈 View Detailed Insights"):
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("#### 📊 Top 10 Most Consistent Attendees")
+                st.markdown("#### 🏆 Top 10 Most Consistent Attendees")
                 top_10 = leaderboard.head(10)[["rank", "name", "total_days", "on_time_percentage"]]
                 st.dataframe(
                     top_10,
@@ -496,8 +526,18 @@ if uploaded_file is not None:
                 st.markdown("#### 📅 Attendance Distribution")
                 # Create attendance distribution bins
                 if not leaderboard.empty:
-                    bins = [0, 2, 4, 6, 8, 10, float('inf')]
-                    labels = ["0-2 days", "3-4 days", "5-6 days", "7-8 days", "9-10 days", "10+ days"]
+                    # Calculate bins based on data
+                    max_days = leaderboard["total_days"].max()
+                    if max_days <= 10:
+                        bins = [0, 2, 4, 6, 8, 10, float('inf')]
+                        labels = ["0-2 days", "3-4 days", "5-6 days", "7-8 days", "9-10 days", "10+ days"]
+                    else:
+                        # For larger ranges, create more bins
+                        bin_step = max(1, max_days // 5)
+                        bins = list(range(0, max_days + bin_step, bin_step))
+                        if max_days not in bins:
+                            bins.append(max_days + 1)
+                        labels = [f"{bins[i]}-{bins[i+1]-1} days" for i in range(len(bins)-1)]
                     
                     leaderboard["attendance_range"] = pd.cut(
                         leaderboard["total_days"], 
@@ -514,33 +554,61 @@ if uploaded_file is not None:
                         use_container_width=True,
                         hide_index=True
                     )
+        
+        # ================== DATA SUMMARY ==================
+        st.markdown("---")
+        st.markdown("### 📋 Data Summary")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Files Processed",
+                len(file_names),
+                help="Number of Excel files successfully processed"
+            )
+        
+        with col2:
+            st.metric(
+                "Data Period",
+                f"{kpis['total_days_covered']} days",
+                help="Total days covered in the data"
+            )
+        
+        with col3:
+            st.metric(
+                "Total Records",
+                f"{len(df):,}",
+                help="Total number of attendance records processed"
+            )
     
     else:
-        st.warning("The uploaded file doesn't contain valid attendance data. Please check the file format.")
+        st.warning("The uploaded files don't contain valid attendance data. Please check the file formats.")
         
 else:
     # ================== PLACEHOLDER UI ==================
-    st.info("👆 Upload an attendance Excel file to view the dashboard")
+    st.info("👆 Upload one or more attendance Excel files to view the dashboard")
     
     # Example of the dashboard layout
     with st.expander("📋 What to expect after upload"):
         st.markdown("""
-        After uploading your Excel file, you'll see:
+        After uploading your Excel files, you'll see:
         
-        1. **📊 Attendance Overview**: Key metrics at a glance
-        2. **🏆 Attendance Leaderboard**: Staff ranked by total days attended (most to least)
-        3. **📅 Weekly Attendance Report**: Clean table with days as columns
-        4. **📈 Detailed Insights**: Top performers and attendance distribution
+        1. **📊 Combined Overview**: Key metrics from all uploaded files
+        2. **🏆 Combined Leaderboard**: Staff ranked across all periods
+        3. **📅 Time Period Analysis**: Weekly and monthly trends
+        4. **📈 Detailed Insights**: Top performers and distribution analysis
         
         **Expected Excel Format:**
-        - File should have columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT
+        - Each file should have columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT
         - Date format: MM/DD/YYYY
         - Time format: HH:MM (24-hour)
         - Can have sign-in and sign-out on separate rows
+        - Files can be from different time periods
         """)
     
     # Placeholder metrics
-    st.markdown("### 📊 Attendance Overview")
+    st.markdown("### 📊 Combined Attendance Overview")
     col1, col2, col3, col4, col5 = st.columns(5)
     
     for col, value, label in zip([col1, col2, col3, col4, col5], 
@@ -551,4 +619,4 @@ else:
 
 # ================== FOOTER ==================
 st.markdown("---")
-st.caption("Staff Attendance Dashboard | Upload Excel files with attendance data for analysis")
+st.caption("Staff Attendance Dashboard | Upload multiple Excel files for comprehensive attendance analysis")
