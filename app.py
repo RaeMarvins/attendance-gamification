@@ -97,7 +97,7 @@ if uploaded_files:
         use_container_width=True
     )
 
-   leaderboard = leaderboard[leaderboard["sign_ins"] > 0]
+      leaderboard = leaderboard[leaderboard["sign_ins"] > 0]
 
   # ---------------- BADGES ----------------
 st.subheader("🏅 Badges")
@@ -130,4 +130,5 @@ st.dataframe(
     # ---------------- RAW DATA (OPTIONAL) ----------------
     with st.expander("🔍 View merged raw data"):
         st.dataframe(filtered, use_container_width=True)
+
 
