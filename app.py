@@ -97,26 +97,37 @@ if uploaded_files:
         use_container_width=True
     )
 
-    # ---------------- BADGES ----------------
-    st.subheader("🏅 Badges")
+   leaderboard = leaderboard[leaderboard["sign_ins"] > 0]
 
-    def badges(row):
-        b = []
-        if row["late"] == 0:
-            b.append("⭐ Perfect Attendance")
-        if row["on_time"] / row["total_sign_ins"] >= 0.9:
-            b.append("👑 Punctuality Champ")
-        if row["points"] >= 300:
-            b.append("🔥 Consistency King")
-        return ", ".join(b) if b else "—"
+  # ---------------- BADGES ----------------
+st.subheader("🏅 Badges")
 
-    leaderboard["badges"] = leaderboard.apply(badges, axis=1)
+def assign_badges(row):
+    badges = []
 
-    st.dataframe(
-        leaderboard[["name","badges"]],
-        use_container_width=True
-    )
+    if row["sign_ins"] == 0:
+        return "—"
+
+    if row["late"] == 0 and row["sign_ins"] > 0:
+        badges.append("⭐ Perfect Attendance")
+
+    if row["sign_ins"] > 0 and (row["on_time"] / row["sign_ins"]) >= 0.9:
+        badges.append("👑 Punctuality Champ")
+
+    if row["points"] >= 300:
+        badges.append("🔥 Consistency King")
+
+    return ", ".join(badges) if badges else "—"
+
+leaderboard["badges"] = leaderboard.apply(assign_badges, axis=1)
+
+st.dataframe(
+    leaderboard[["name", "badges"]],
+    use_container_width=True
+)
+
 
     # ---------------- RAW DATA (OPTIONAL) ----------------
     with st.expander("🔍 View merged raw data"):
         st.dataframe(filtered, use_container_width=True)
+
