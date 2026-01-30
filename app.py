@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime
 from io import BytesIO
-from fpdf import FPDF
+import matplotlib.pyplot as plt
 
 # ================== CONFIG ==================
 st.set_page_config(
@@ -129,23 +129,19 @@ def download_excel(df):
     return output.getvalue()
 
 def download_pdf(df):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="Leaderboard", ln=True, align="C")
-    pdf.ln(5)
-    # Add table header
-    for col in df.columns:
-        pdf.cell(40, 10, col, 1)
-    pdf.ln()
-    # Add table rows
-    for _, row in df.iterrows():
-        for col in df.columns:
-            pdf.cell(40, 10, str(row[col]), 1)
-        pdf.ln()
-    output = BytesIO()
-    pdf.output(output)
-    return output.getvalue()
+    fig, ax = plt.subplots(figsize=(8, len(df)*0.5 + 1))
+    ax.axis('tight')
+    ax.axis('off')
+    table = ax.table(cellText=df.values, colLabels=df.columns, loc='center', cellLoc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 1.5)
+    
+    buf = BytesIO()
+    plt.savefig(buf, format='pdf', bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ================== MAIN APP ==================
