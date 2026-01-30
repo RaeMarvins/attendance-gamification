@@ -4,6 +4,7 @@ import numpy as np
 import datetime
 from io import BytesIO
 from datetime import time
+import zipfile
 
 # ================== CONFIG ==================
 st.set_page_config(
@@ -208,9 +209,14 @@ def create_attendance_leaderboard(df):
     leaderboard = pd.merge(attendance_stats, avg_times, on="name", how="left")
     
     # Convert average minutes back to time string
-    leaderboard["avg_signin_time"] = leaderboard["avg_minutes"].apply(
-        lambda x: f"{int(x//60):02d}:{int(x%60):02d}" if not np.isnan(x) else "N/A"
-    )
+    def format_time(minutes):
+        if np.isnan(minutes):
+            return "N/A"
+        # Round to nearest minute
+        minutes = int(round(minutes))
+        return f"{minutes//60:02d}:{minutes%60:02d}"
+    
+    leaderboard["avg_signin_time"] = leaderboard["avg_minutes"].apply(format_time)
     
     # Calculate on-time percentage
     leaderboard["on_time_percentage"] = round(
@@ -283,7 +289,7 @@ def create_time_period_report(df, period_type="week"):
 
 def create_detailed_insights(df, leaderboard):
     """Create detailed insights data"""
-    if df.empty:
+    if df.empty or leaderboard.empty:
         return {
             "top_10_attendees": pd.DataFrame(),
             "attendance_distribution": pd.DataFrame(),
@@ -294,24 +300,37 @@ def create_detailed_insights(df, leaderboard):
     top_10 = leaderboard.head(10)[["rank", "name", "total_days", "on_time_percentage"]].copy()
     top_10.columns = ["Rank", "Name", "Days Attended", "On-Time %"]
     
-    # Attendance distribution
+    # Attendance distribution - FIXED BIN CREATION
     max_days = leaderboard["total_days"].max()
+    
     if max_days <= 10:
-        bins = [0, 2, 4, 6, 8, 10, float('inf')]
-        labels = ["0-2 days", "3-4 days", "5-6 days", "7-8 days", "9-10 days", "10+ days"]
+        bins = [0, 2, 4, 6, 8, 10]
+        labels = ["0-1 days", "2-3 days", "4-5 days", "6-7 days", "8-9 days", "10+ days"]
     else:
+        # Create bins with unique values
         bin_step = max(1, max_days // 5)
         bins = list(range(0, max_days + bin_step, bin_step))
-        if max_days not in bins:
-            bins.append(max_days + 1)
-        labels = [f"{bins[i]}-{bins[i+1]-1} days" for i in range(len(bins)-1)]
+        # Ensure bins are unique and increasing
+        bins = sorted(set(bins))
+        # Make sure last bin covers max_days
+        if bins[-1] <= max_days:
+            bins.append(bins[-1] + bin_step)
+        
+        # Create labels
+        labels = []
+        for i in range(len(bins)-1):
+            if i == len(bins)-2:
+                labels.append(f"{bins[i]}+ days")
+            else:
+                labels.append(f"{bins[i]}-{bins[i+1]-1} days")
     
     leaderboard_copy = leaderboard.copy()
     leaderboard_copy["attendance_range"] = pd.cut(
         leaderboard_copy["total_days"], 
         bins=bins, 
         labels=labels, 
-        right=False
+        right=False,
+        include_lowest=True
     )
     
     distribution = leaderboard_copy["attendance_range"].value_counts().sort_index().reset_index()
@@ -335,15 +354,11 @@ def create_detailed_insights(df, leaderboard):
     }
 
 def generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis, file_names, insights):
-    """Generate a comprehensive Excel export with multiple sheets using openpyxl"""
+    """Generate a comprehensive Excel export with multiple sheets"""
     output = BytesIO()
     
-    # Try using openpyxl engine which is more commonly available
     try:
-        # First, let's create a simple Excel file with pandas
-        # We'll create separate Excel files and combine them or create multiple sheets
-        
-        # Create a simple Excel writer
+        # Try using openpyxl engine which is more commonly available
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             # Write KPIs summary sheet
             kpis_df = pd.DataFrame.from_dict(kpis, orient='index').reset_index()
@@ -353,7 +368,7 @@ def generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis
             # Write leaderboard
             leaderboard.to_excel(writer, sheet_name="Attendance Leaderboard", index=False)
             
-            # Write raw data (limited columns for clarity)
+            # Write raw data
             df[["date", "name", "department", "sign_in_time", "day", "source_file"]].to_excel(
                 writer, sheet_name="Raw Attendance Data", index=False
             )
@@ -381,10 +396,11 @@ def generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis
             files_df.to_excel(writer, sheet_name="Files Processed", index=False)
             
     except Exception as e:
-        st.warning(f"Could not create Excel file with formatting: {str(e)}")
-        # Fallback: create a simple CSV zip or multiple files
+        st.warning(f"Excel export limited: {str(e)}")
+        # Create a simple CSV-based export instead
         return None
     
+    output.seek(0)
     return output.getvalue()
 
 def generate_dashboard_summary(df, leaderboard, kpis, file_names):
@@ -445,9 +461,6 @@ def generate_dashboard_summary(df, leaderboard, kpis, file_names):
 
 def create_csv_export(df, leaderboard, weekly_report, monthly_report, insights):
     """Create a zip file containing multiple CSV files"""
-    import zipfile
-    from io import BytesIO
-    
     zip_buffer = BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -755,7 +768,7 @@ if uploaded_files:
                     help="Download complete dashboard data in Excel format"
                 )
             else:
-                st.warning("Excel export not available")
+                st.info("Excel export requires openpyxl. Use CSV Package instead.")
         
         with col2:
             # Download CSV zip package
