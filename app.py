@@ -72,46 +72,41 @@ if uploaded_files:
     )
 
     # ---------------- LEADERBOARD ----------------
-    st.subheader("🏆 Leaderboard")
+    # ---------------- LEADERBOARD ----------------
+st.subheader("🏆 Leaderboard")
 
-    leaderboard = (
-        filtered.groupby("name")
-        .agg(
-            total_sign_ins=("sign_in","count"),
-            on_time=("on_time","sum"),
-            late=("late","sum")
-        )
-        .reset_index()
+leaderboard = (
+    filtered.groupby("name")
+    .agg(
+        sign_ins=("sign_in", "count"),
+        on_time=("on_time", "sum"),
+        late=("late", "sum"),
     )
+    .reset_index()
+)
 
-    leaderboard["points"] = (
-        leaderboard["on_time"] * 10 +
-        leaderboard["late"] * 2
-    )
+# Remove rows with zero sign-ins (prevents math errors)
+leaderboard = leaderboard[leaderboard["sign_ins"] > 0]
 
-    leaderboard = leaderboard.sort_values("points", ascending=False)
-    leaderboard["rank"] = range(1, len(leaderboard) + 1)
+leaderboard["points"] = leaderboard["on_time"] * 10 + leaderboard["late"] * 2
+leaderboard = leaderboard.sort_values("points", ascending=False)
+leaderboard["rank"] = range(1, len(leaderboard) + 1)
 
-    st.dataframe(
-        leaderboard[["rank","name","points","on_time","late"]],
-        use_container_width=True
-    )
+st.dataframe(
+    leaderboard[["rank", "name", "points", "on_time", "late"]],
+    use_container_width=True
+)
 
-      leaderboard = leaderboard[leaderboard["sign_ins"] > 0]
-
-  # ---------------- BADGES ----------------
+# ---------------- BADGES ----------------
 st.subheader("🏅 Badges")
 
 def assign_badges(row):
     badges = []
 
-    if row["sign_ins"] == 0:
-        return "—"
-
-    if row["late"] == 0 and row["sign_ins"] > 0:
+    if row["late"] == 0:
         badges.append("⭐ Perfect Attendance")
 
-    if row["sign_ins"] > 0 and (row["on_time"] / row["sign_ins"]) >= 0.9:
+    if (row["on_time"] / row["sign_ins"]) >= 0.9:
         badges.append("👑 Punctuality Champ")
 
     if row["points"] >= 300:
@@ -127,8 +122,10 @@ st.dataframe(
 )
 
 
+
     # ---------------- RAW DATA (OPTIONAL) ----------------
     with st.expander("🔍 View merged raw data"):
         st.dataframe(filtered, use_container_width=True)
+
 
 
