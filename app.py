@@ -5,7 +5,7 @@ from io import BytesIO
 
 # ================== CONFIG ==================
 st.set_page_config(
-    page_title="Attendance Gamification",
+    page_title="🎮 Attendance Gamification",
     layout="wide"
 )
 
@@ -15,12 +15,13 @@ POINTS_LATE = 2
 WEEKDAY_ORDER = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]
 
 LEVELS = {"Bronze": (0,99), "Silver": (100,299), "Gold": (300,float("inf"))}
+LEVEL_COLORS = {"Bronze":"#cd7f32", "Silver":"#c0c0c0", "Gold":"#ffd700"}
 
 # ================== HEADER ==================
 st.title("🎮 Multi-Week Attendance Gamification Dashboard")
 st.markdown("""
 Upload **multiple weekly attendance Excel files**.  
-The system merges them and generates insights, leaderboards, and badges.
+The dashboard shows gamified leaderboards with levels, streaks, and badges.
 """)
 
 # ================== FILE UPLOAD ==================
@@ -42,6 +43,36 @@ def process_file(file):
     df["week"] = file.name.replace(".xlsx","")
     return df
 
+def calculate_streak(name, df):
+    user_data = df[df["name"]==name].sort_values("date")
+    streak=max_streak=0
+    for on_time in user_data["on_time"]:
+        if on_time:
+            streak +=1
+            max_streak = max(max_streak, streak)
+        else:
+            streak=0
+    return max_streak
+
+def assign_level(points):
+    for lvl,(low,high) in LEVELS.items():
+        if low <= points <= high:
+            return lvl
+    return "—"
+
+def assign_badges(row):
+    badges=[]
+    if row["late"]==0:
+        badges.append("⭐ Perfect Attendance")
+    if row["on_time"]/row["sign_ins"]>=0.9:
+        badges.append("👑 Punctuality Champ")
+    if row["points"]>=300:
+        badges.append("🔥 Consistency King")
+    streak = calculate_streak(row["name"], filtered)
+    if streak>=5:
+        badges.append(f"🧠 {streak}-Day On-Time Streak")
+    return badges  # Keep as list for colored display
+
 def build_leaderboard(df):
     lb = df.groupby("name").agg(
         sign_ins=("sign_in","count"),
@@ -56,89 +87,55 @@ def build_leaderboard(df):
     lb["badges"] = lb.apply(assign_badges, axis=1)
     return lb
 
-def assign_level(points):
-    for lvl,(low,high) in LEVELS.items():
-        if low <= points <= high:
-            return lvl
-    return "—"
-
-def calculate_streak(name, df):
-    user_data = df[df["name"]==name].sort_values("date")
-    streak=max_streak=0
-    for on_time in user_data["on_time"]:
-        if on_time:
-            streak +=1
-            max_streak = max(max_streak, streak)
-        else:
-            streak=0
-    return max_streak
-
-def assign_badges(row):
-    badges=[]
-    if row["late"]==0:
-        badges.append("⭐ Perfect Attendance")
-    if row["on_time"]/row["sign_ins"]>=0.9:
-        badges.append("👑 Punctuality Champ")
-    if row["points"]>=300:
-        badges.append("🔥 Consistency King")
-    streak = calculate_streak(row["name"], filtered)
-    if streak>=5:
-        badges.append(f"🧠 {streak}-Day On-Time Streak")
-    return ", ".join(badges) if badges else "—"
-
-def get_weekly_winners(df):
-    winners = df.groupby("week").apply(lambda w: build_leaderboard(w).iloc[0])
-    winners = winners.reset_index(drop=True)
-    return winners[["week","name","points"]]
-
 def download_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Leaderboard")
     return output.getvalue()
 
-def download_pdf_like_excel(df):
-    """
-    Simulate PDF export by writing an Excel that can be printed as PDF.
-    Works in any environment, no extra libraries.
-    """
-    return download_excel(df)
-
 # ================== MAIN ==================
 if uploaded_files:
     all_data = pd.concat([process_file(f) for f in uploaded_files], ignore_index=True)
 
-    # Daily overview
+    # -------- DAILY OVERVIEW --------
     st.subheader("📊 Attendance by Day (All Weeks Combined)")
     daily = all_data.groupby("day").agg(on_time=("on_time","sum"), late=("late","sum"))
     daily = daily.reindex(WEEKDAY_ORDER).dropna(how="all")
     st.bar_chart(daily)
 
-    # Week filter
+    # -------- WEEK FILTER --------
     st.subheader("🗓️ Week Filter")
     selected_week = st.selectbox("Select week", options=["All Weeks"] + sorted(all_data["week"].unique()))
     filtered = all_data if selected_week=="All Weeks" else all_data[all_data["week"]==selected_week]
 
-    # Leaderboard
-    st.subheader("🏆 Leaderboard")
+    # -------- LEADERBOARD --------
+    st.subheader("🏆 Gamified Leaderboard")
     leaderboard = build_leaderboard(filtered)
-    st.dataframe(leaderboard[["rank","name","points","on_time","late","level","badges"]], use_container_width=True)
 
-    # Weekly winners
-    st.subheader("🥇 Weekly Winners")
-    weekly_winners = get_weekly_winners(all_data)
-    st.table(weekly_winners)
+    # Display leaderboard with colors
+    for _, row in leaderboard.iterrows():
+        badge_str = " ".join(row["badges"])
+        level_color = LEVEL_COLORS.get(row["level"], "#ffffff")
+        st.markdown(
+            f"""
+            <div style="border:1px solid #ccc; padding:10px; margin:5px; border-radius:8px;">
+            <b>Rank #{row['rank']} - {row['name']}</b> | 
+            <span style='color:{level_color}; font-weight:bold;'>{row['level']}</span> | 
+            Points: {row['points']} | On-Time: {row['on_time']} | Late: {row['late']} <br>
+            <span style='background-color:#e0e0e0; border-radius:5px; padding:3px;'>{badge_str}</span>
+            </div>
+            """, unsafe_allow_html=True
+        )
 
-    # Export
+    # -------- EXPORT OPTIONS --------
     st.subheader("📤 Export Leaderboard")
     excel_data = download_excel(leaderboard)
-    pdf_like_data = download_pdf_like_excel(leaderboard)
     st.download_button("Download Excel", data=excel_data, file_name="leaderboard.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.download_button("Download PDF-like (Excel)", data=pdf_like_data, file_name="leaderboard.pdf",
+    st.download_button("Download PDF-like (Excel)", data=excel_data, file_name="leaderboard.pdf",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    # Raw data
+    # -------- RAW DATA --------
     with st.expander("🔍 View merged raw data"):
         st.dataframe(filtered, use_container_width=True)
 
