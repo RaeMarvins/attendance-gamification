@@ -4,7 +4,6 @@ import numpy as np
 import datetime
 from io import BytesIO
 from datetime import time
-import base64
 
 # ================== CONFIG ==================
 st.set_page_config(
@@ -285,7 +284,11 @@ def create_time_period_report(df, period_type="week"):
 def create_detailed_insights(df, leaderboard):
     """Create detailed insights data"""
     if df.empty:
-        return pd.DataFrame()
+        return {
+            "top_10_attendees": pd.DataFrame(),
+            "attendance_distribution": pd.DataFrame(),
+            "department_summary": pd.DataFrame()
+        }
     
     # Top 10 most consistent attendees
     top_10 = leaderboard.head(10)[["rank", "name", "total_days", "on_time_percentage"]].copy()
@@ -332,66 +335,55 @@ def create_detailed_insights(df, leaderboard):
     }
 
 def generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis, file_names, insights):
-    """Generate a comprehensive Excel export with multiple sheets"""
+    """Generate a comprehensive Excel export with multiple sheets using openpyxl"""
     output = BytesIO()
     
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Write KPIs summary sheet
-        kpis_df = pd.DataFrame.from_dict(kpis, orient='index').reset_index()
-        kpis_df.columns = ["Metric", "Value"]
-        kpis_df.to_excel(writer, sheet_name="KPIs Summary", index=False)
+    # Try using openpyxl engine which is more commonly available
+    try:
+        # First, let's create a simple Excel file with pandas
+        # We'll create separate Excel files and combine them or create multiple sheets
         
-        # Write leaderboard
-        leaderboard.to_excel(writer, sheet_name="Attendance Leaderboard", index=False)
-        
-        # Write raw data
-        df[["date", "name", "department", "sign_in_time", "day", "source_file"]].to_excel(
-            writer, sheet_name="Raw Attendance Data", index=False
-        )
-        
-        # Write weekly report
-        weekly_report.to_excel(writer, sheet_name="Weekly Analysis", index=False)
-        
-        # Write monthly report
-        monthly_report.to_excel(writer, sheet_name="Monthly Analysis", index=False)
-        
-        # Write insights
-        insights["top_10_attendees"].to_excel(writer, sheet_name="Top 10 Attendees", index=False)
-        insights["attendance_distribution"].to_excel(writer, sheet_name="Attendance Distribution", index=False)
-        insights["department_summary"].to_excel(writer, sheet_name="Department Summary", index=False)
-        
-        # Write file list
-        files_df = pd.DataFrame(file_names, columns=["Uploaded Files"])
-        files_df.to_excel(writer, sheet_name="Files Processed", index=False)
-        
-        # Get workbook and worksheets for formatting
-        workbook = writer.book
-        
-        # Format KPIs sheet
-        kpis_sheet = writer.sheets["KPIs Summary"]
-        kpis_format = workbook.add_format({'bold': True})
-        kpis_sheet.set_column('A:A', 30)
-        kpis_sheet.set_column('B:B', 20)
-        
-        # Format leaderboard
-        leaderboard_sheet = writer.sheets["Attendance Leaderboard"]
-        leaderboard_sheet.set_column('A:A', 8)   # Rank
-        leaderboard_sheet.set_column('B:B', 25)  # Name
-        leaderboard_sheet.set_column('C:C', 20)  # Department
-        leaderboard_sheet.set_column('D:D', 10)  # Total Days
-        leaderboard_sheet.set_column('E:E', 15)  # Avg Sign-In Time
-        leaderboard_sheet.set_column('F:F', 12)  # On-Time %
-        leaderboard_sheet.set_column('G:G', 12)  # On-Time Days
-        leaderboard_sheet.set_column('H:H', 10)  # Late Days
-        
-        # Format raw data sheet
-        raw_sheet = writer.sheets["Raw Attendance Data"]
-        raw_sheet.set_column('A:A', 12)  # Date
-        raw_sheet.set_column('B:B', 25)  # Name
-        raw_sheet.set_column('C:C', 20)  # Department
-        raw_sheet.set_column('D:D', 15)  # Sign-In Time
-        raw_sheet.set_column('E:E', 15)  # Day
-        raw_sheet.set_column('F:F', 30)  # Source File
+        # Create a simple Excel writer
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Write KPIs summary sheet
+            kpis_df = pd.DataFrame.from_dict(kpis, orient='index').reset_index()
+            kpis_df.columns = ["Metric", "Value"]
+            kpis_df.to_excel(writer, sheet_name="KPIs Summary", index=False)
+            
+            # Write leaderboard
+            leaderboard.to_excel(writer, sheet_name="Attendance Leaderboard", index=False)
+            
+            # Write raw data (limited columns for clarity)
+            df[["date", "name", "department", "sign_in_time", "day", "source_file"]].to_excel(
+                writer, sheet_name="Raw Attendance Data", index=False
+            )
+            
+            # Write weekly report
+            if not weekly_report.empty:
+                weekly_report.to_excel(writer, sheet_name="Weekly Analysis", index=False)
+            
+            # Write monthly report
+            if not monthly_report.empty:
+                monthly_report.to_excel(writer, sheet_name="Monthly Analysis", index=False)
+            
+            # Write insights
+            if not insights["top_10_attendees"].empty:
+                insights["top_10_attendees"].to_excel(writer, sheet_name="Top 10 Attendees", index=False)
+            
+            if not insights["attendance_distribution"].empty:
+                insights["attendance_distribution"].to_excel(writer, sheet_name="Attendance Distribution", index=False)
+            
+            if not insights["department_summary"].empty:
+                insights["department_summary"].to_excel(writer, sheet_name="Department Summary", index=False)
+            
+            # Write file list
+            files_df = pd.DataFrame(file_names, columns=["Uploaded Files"])
+            files_df.to_excel(writer, sheet_name="Files Processed", index=False)
+            
+    except Exception as e:
+        st.warning(f"Could not create Excel file with formatting: {str(e)}")
+        # Fallback: create a simple CSV zip or multiple files
+        return None
     
     return output.getvalue()
 
@@ -417,32 +409,81 @@ def generate_dashboard_summary(df, leaderboard, kpis, file_names):
     -----------------
     """
     
-    for i in range(min(5, len(leaderboard))):
-        staff = leaderboard.iloc[i]
-        summary += f"{i+1}. {staff['name']} - {staff['total_days']} days ({staff['on_time_percentage']}% on-time)\n"
+    if not leaderboard.empty:
+        for i in range(min(5, len(leaderboard))):
+            staff = leaderboard.iloc[i]
+            summary += f"{i+1}. {staff['name']} - {staff['total_days']} days ({staff['on_time_percentage']}% on-time)\n"
     
     summary += f"""
     
     ATTENDANCE DISTRIBUTION
     ------------------------
-    • Perfect Attendance (No Late Days): {len(leaderboard[leaderboard['late_days'] == 0])} staff
-    • Average Days per Staff: {round(leaderboard['total_days'].mean(), 1)} days
-    • Median Days per Staff: {leaderboard['total_days'].median()} days
+    • Perfect Attendance (No Late Days): {len(leaderboard[leaderboard['late_days'] == 0]) if not leaderboard.empty else 0} staff
+    • Average Days per Staff: {round(leaderboard['total_days'].mean(), 1) if not leaderboard.empty else 0} days
+    • Median Days per Staff: {leaderboard['total_days'].median() if not leaderboard.empty else 0} days
     
     PUNCTUALITY OVERVIEW
     --------------------
-    • Average Sign-In Time: {leaderboard['avg_signin_time'].iloc[0]} (earliest)
-    • Best On-Time Rate: {leaderboard['on_time_percentage'].max()}%
-    • Average On-Time Rate: {round(leaderboard['on_time_percentage'].mean(), 1)}%
+    """
+    
+    if not leaderboard.empty and len(leaderboard) > 0:
+        summary += f"""• Average Sign-In Time: {leaderboard['avg_signin_time'].iloc[0] if len(leaderboard) > 0 else 'N/A'} (earliest)
+    • Best On-Time Rate: {leaderboard['on_time_percentage'].max() if not leaderboard.empty else 0}%
+    • Average On-Time Rate: {round(leaderboard['on_time_percentage'].mean(), 1) if not leaderboard.empty else 0}%
+    """
+    
+    summary += f"""
     
     DATA QUALITY
     ------------
     • Total Records: {len(df):,}
-    • Unique Dates: {df['date'].dt.date.nunique()}
+    • Unique Dates: {df['date'].dt.date.nunique() if not df.empty else 0}
     • Files Processed: {len(file_names)}
     """
     
     return summary
+
+def create_csv_export(df, leaderboard, weekly_report, monthly_report, insights):
+    """Create a zip file containing multiple CSV files"""
+    import zipfile
+    from io import BytesIO
+    
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Add leaderboard
+        leaderboard_csv = leaderboard.to_csv(index=False)
+        zip_file.writestr("attendance_leaderboard.csv", leaderboard_csv)
+        
+        # Add raw data
+        raw_data_csv = df[["date", "name", "department", "sign_in_time", "day", "source_file"]].to_csv(index=False)
+        zip_file.writestr("raw_attendance_data.csv", raw_data_csv)
+        
+        # Add weekly report
+        if not weekly_report.empty:
+            weekly_csv = weekly_report.to_csv(index=False)
+            zip_file.writestr("weekly_analysis.csv", weekly_csv)
+        
+        # Add monthly report
+        if not monthly_report.empty:
+            monthly_csv = monthly_report.to_csv(index=False)
+            zip_file.writestr("monthly_analysis.csv", monthly_csv)
+        
+        # Add insights
+        if not insights["top_10_attendees"].empty:
+            top10_csv = insights["top_10_attendees"].to_csv(index=False)
+            zip_file.writestr("top_10_attendees.csv", top10_csv)
+        
+        if not insights["attendance_distribution"].empty:
+            dist_csv = insights["attendance_distribution"].to_csv(index=False)
+            zip_file.writestr("attendance_distribution.csv", dist_csv)
+        
+        if not insights["department_summary"].empty:
+            dept_csv = insights["department_summary"].to_csv(index=False)
+            zip_file.writestr("department_summary.csv", dept_csv)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
 
 # ================== MAIN ==================
 if uploaded_files:
@@ -667,66 +708,82 @@ if uploaded_files:
             
             with col1:
                 st.markdown("#### 🏆 Top 10 Most Consistent Attendees")
-                st.dataframe(
-                    insights["top_10_attendees"],
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Rank": "Rank",
-                        "Name": "Name",
-                        "Days Attended": "Days Attended",
-                        "On-Time %": st.column_config.ProgressColumn(
-                            "On-Time %",
-                            format="%.1f%%",
-                            min_value=0,
-                            max_value=100
-                        )
-                    }
-                )
+                if not insights["top_10_attendees"].empty:
+                    st.dataframe(
+                        insights["top_10_attendees"],
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Rank": "Rank",
+                            "Name": "Name",
+                            "Days Attended": "Days Attended",
+                            "On-Time %": st.column_config.ProgressColumn(
+                                "On-Time %",
+                                format="%.1f%%",
+                                min_value=0,
+                                max_value=100
+                            )
+                        }
+                    )
             
             with col2:
                 st.markdown("#### 📅 Attendance Distribution")
-                st.dataframe(
-                    insights["attendance_distribution"],
-                    use_container_width=True,
-                    hide_index=True
-                )
+                if not insights["attendance_distribution"].empty:
+                    st.dataframe(
+                        insights["attendance_distribution"],
+                        use_container_width=True,
+                        hide_index=True
+                    )
         
         # ================== EXPORT SECTION ==================
         st.markdown("---")
         st.markdown("## 📤 Export Dashboard Report")
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             # Generate comprehensive Excel report
-            excel_data = generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis, file_names, insights)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            excel_data = generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis, file_names, insights)
             
-            st.download_button(
-                label="📊 Download Full Excel Report",
-                data=excel_data,
-                file_name=f"attendance_dashboard_report_{timestamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help="Download complete dashboard data in Excel format with multiple sheets"
-            )
+            if excel_data:
+                st.download_button(
+                    label="📊 Download Excel Report",
+                    data=excel_data,
+                    file_name=f"attendance_dashboard_{timestamp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    help="Download complete dashboard data in Excel format"
+                )
+            else:
+                st.warning("Excel export not available")
         
         with col2:
-            # Download leaderboard only
-            leaderboard_csv = leaderboard.to_csv(index=False)
+            # Download CSV zip package
+            csv_zip = create_csv_export(df, leaderboard, weekly_report, monthly_report, insights)
             st.download_button(
-                label="📋 Download Leaderboard (CSV)",
-                data=leaderboard_csv,
-                file_name=f"attendance_leaderboard_{timestamp}.csv",
-                mime="text/csv",
-                help="Download only the attendance leaderboard in CSV format"
+                label="📁 Download CSV Package (ZIP)",
+                data=csv_zip,
+                file_name=f"attendance_data_{timestamp}.zip",
+                mime="application/zip",
+                help="Download all data as CSV files in a ZIP archive"
             )
         
         with col3:
+            # Download leaderboard only
+            leaderboard_csv = leaderboard.to_csv(index=False)
+            st.download_button(
+                label="📋 Download Leaderboard",
+                data=leaderboard_csv,
+                file_name=f"attendance_leaderboard_{timestamp}.csv",
+                mime="text/csv",
+                help="Download only the attendance leaderboard"
+            )
+        
+        with col4:
             # Download summary report
             summary_text = generate_dashboard_summary(df, leaderboard, kpis, file_names)
             st.download_button(
-                label="📄 Download Summary Report (TXT)",
+                label="📄 Download Summary",
                 data=summary_text,
                 file_name=f"attendance_summary_{timestamp}.txt",
                 mime="text/plain",
