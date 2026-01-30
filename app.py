@@ -4,6 +4,7 @@ import numpy as np
 import datetime
 from io import BytesIO
 from datetime import time
+import base64
 
 # ================== CONFIG ==================
 st.set_page_config(
@@ -281,6 +282,168 @@ def create_time_period_report(df, period_type="week"):
     
     return period_stats
 
+def create_detailed_insights(df, leaderboard):
+    """Create detailed insights data"""
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Top 10 most consistent attendees
+    top_10 = leaderboard.head(10)[["rank", "name", "total_days", "on_time_percentage"]].copy()
+    top_10.columns = ["Rank", "Name", "Days Attended", "On-Time %"]
+    
+    # Attendance distribution
+    max_days = leaderboard["total_days"].max()
+    if max_days <= 10:
+        bins = [0, 2, 4, 6, 8, 10, float('inf')]
+        labels = ["0-2 days", "3-4 days", "5-6 days", "7-8 days", "9-10 days", "10+ days"]
+    else:
+        bin_step = max(1, max_days // 5)
+        bins = list(range(0, max_days + bin_step, bin_step))
+        if max_days not in bins:
+            bins.append(max_days + 1)
+        labels = [f"{bins[i]}-{bins[i+1]-1} days" for i in range(len(bins)-1)]
+    
+    leaderboard_copy = leaderboard.copy()
+    leaderboard_copy["attendance_range"] = pd.cut(
+        leaderboard_copy["total_days"], 
+        bins=bins, 
+        labels=labels, 
+        right=False
+    )
+    
+    distribution = leaderboard_copy["attendance_range"].value_counts().sort_index().reset_index()
+    distribution.columns = ["Days Attended Range", "Number of Staff"]
+    
+    # Department summary
+    dept_summary = df.groupby("department").agg({
+        "name": "nunique",
+        "sign_in_time": "count",
+        "on_time": "sum",
+        "late": "sum"
+    }).reset_index()
+    
+    dept_summary.columns = ["Department", "Staff Count", "Total Sign-Ins", "On-Time", "Late"]
+    dept_summary["On-Time %"] = round((dept_summary["On-Time"] / dept_summary["Total Sign-Ins"]) * 100, 1)
+    
+    return {
+        "top_10_attendees": top_10,
+        "attendance_distribution": distribution,
+        "department_summary": dept_summary
+    }
+
+def generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis, file_names, insights):
+    """Generate a comprehensive Excel export with multiple sheets"""
+    output = BytesIO()
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # Write KPIs summary sheet
+        kpis_df = pd.DataFrame.from_dict(kpis, orient='index').reset_index()
+        kpis_df.columns = ["Metric", "Value"]
+        kpis_df.to_excel(writer, sheet_name="KPIs Summary", index=False)
+        
+        # Write leaderboard
+        leaderboard.to_excel(writer, sheet_name="Attendance Leaderboard", index=False)
+        
+        # Write raw data
+        df[["date", "name", "department", "sign_in_time", "day", "source_file"]].to_excel(
+            writer, sheet_name="Raw Attendance Data", index=False
+        )
+        
+        # Write weekly report
+        weekly_report.to_excel(writer, sheet_name="Weekly Analysis", index=False)
+        
+        # Write monthly report
+        monthly_report.to_excel(writer, sheet_name="Monthly Analysis", index=False)
+        
+        # Write insights
+        insights["top_10_attendees"].to_excel(writer, sheet_name="Top 10 Attendees", index=False)
+        insights["attendance_distribution"].to_excel(writer, sheet_name="Attendance Distribution", index=False)
+        insights["department_summary"].to_excel(writer, sheet_name="Department Summary", index=False)
+        
+        # Write file list
+        files_df = pd.DataFrame(file_names, columns=["Uploaded Files"])
+        files_df.to_excel(writer, sheet_name="Files Processed", index=False)
+        
+        # Get workbook and worksheets for formatting
+        workbook = writer.book
+        
+        # Format KPIs sheet
+        kpis_sheet = writer.sheets["KPIs Summary"]
+        kpis_format = workbook.add_format({'bold': True})
+        kpis_sheet.set_column('A:A', 30)
+        kpis_sheet.set_column('B:B', 20)
+        
+        # Format leaderboard
+        leaderboard_sheet = writer.sheets["Attendance Leaderboard"]
+        leaderboard_sheet.set_column('A:A', 8)   # Rank
+        leaderboard_sheet.set_column('B:B', 25)  # Name
+        leaderboard_sheet.set_column('C:C', 20)  # Department
+        leaderboard_sheet.set_column('D:D', 10)  # Total Days
+        leaderboard_sheet.set_column('E:E', 15)  # Avg Sign-In Time
+        leaderboard_sheet.set_column('F:F', 12)  # On-Time %
+        leaderboard_sheet.set_column('G:G', 12)  # On-Time Days
+        leaderboard_sheet.set_column('H:H', 10)  # Late Days
+        
+        # Format raw data sheet
+        raw_sheet = writer.sheets["Raw Attendance Data"]
+        raw_sheet.set_column('A:A', 12)  # Date
+        raw_sheet.set_column('B:B', 25)  # Name
+        raw_sheet.set_column('C:C', 20)  # Department
+        raw_sheet.set_column('D:D', 15)  # Sign-In Time
+        raw_sheet.set_column('E:E', 15)  # Day
+        raw_sheet.set_column('F:F', 30)  # Source File
+    
+    return output.getvalue()
+
+def generate_dashboard_summary(df, leaderboard, kpis, file_names):
+    """Generate a text summary of the dashboard"""
+    summary = f"""
+    STAFF ATTENDANCE DASHBOARD REPORT
+    =================================
+    
+    Report Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    Data Period: {kpis['date_range']} ({kpis['total_days_covered']} days)
+    Files Processed: {len(file_names)}
+    
+    KEY PERFORMANCE INDICATORS
+    --------------------------
+    • Total Staff: {kpis['total_staff']}
+    • Daily Attendance Rate: {kpis['avg_daily_attendance']}%
+    • On-Time Rate: {kpis['on_time_rate']}%
+    • Average Sign-Ins per Staff: {kpis['avg_signins']}
+    • Total Sign-Ins: {kpis['total_signins']:,}
+    
+    TOP 5 PERFORMERS
+    -----------------
+    """
+    
+    for i in range(min(5, len(leaderboard))):
+        staff = leaderboard.iloc[i]
+        summary += f"{i+1}. {staff['name']} - {staff['total_days']} days ({staff['on_time_percentage']}% on-time)\n"
+    
+    summary += f"""
+    
+    ATTENDANCE DISTRIBUTION
+    ------------------------
+    • Perfect Attendance (No Late Days): {len(leaderboard[leaderboard['late_days'] == 0])} staff
+    • Average Days per Staff: {round(leaderboard['total_days'].mean(), 1)} days
+    • Median Days per Staff: {leaderboard['total_days'].median()} days
+    
+    PUNCTUALITY OVERVIEW
+    --------------------
+    • Average Sign-In Time: {leaderboard['avg_signin_time'].iloc[0]} (earliest)
+    • Best On-Time Rate: {leaderboard['on_time_percentage'].max()}%
+    • Average On-Time Rate: {round(leaderboard['on_time_percentage'].mean(), 1)}%
+    
+    DATA QUALITY
+    ------------
+    • Total Records: {len(df):,}
+    • Unique Dates: {df['date'].dt.date.nunique()}
+    • Files Processed: {len(file_names)}
+    """
+    
+    return summary
+
 # ================== MAIN ==================
 if uploaded_files:
     # Process all uploaded files
@@ -297,6 +460,12 @@ if uploaded_files:
         
         # Calculate KPIs from combined data
         kpis = calculate_kpis(df)
+        
+        # Generate reports
+        leaderboard = create_attendance_leaderboard(df)
+        weekly_report = create_time_period_report(df, period_type="week")
+        monthly_report = create_time_period_report(df, period_type="month")
+        insights = create_detailed_insights(df, leaderboard)
         
         # ================== KPI METRICS ==================
         st.markdown("### 📊 Combined Attendance Overview")
@@ -346,8 +515,6 @@ if uploaded_files:
         # ================== ATTENDANCE LEADERBOARD ==================
         st.markdown("### 🏆 Combined Attendance & Punctuality Leaderboard")
         st.markdown(f"**Based on {kpis['total_days_covered']} days of data across all uploaded files**")
-        
-        leaderboard = create_attendance_leaderboard(df)
         
         if not leaderboard.empty:
             # Display leaderboard with progress bars for on-time percentage
@@ -436,8 +603,6 @@ if uploaded_files:
         
         with tab1:
             st.markdown("#### 📊 Weekly Attendance Trends")
-            weekly_report = create_time_period_report(df, period_type="week")
-            
             if not weekly_report.empty:
                 st.dataframe(
                     weekly_report,
@@ -468,8 +633,6 @@ if uploaded_files:
         
         with tab2:
             st.markdown("#### 📊 Monthly Attendance Trends")
-            monthly_report = create_time_period_report(df, period_type="month")
-            
             if not monthly_report.empty:
                 st.dataframe(
                     monthly_report,
@@ -504,16 +667,15 @@ if uploaded_files:
             
             with col1:
                 st.markdown("#### 🏆 Top 10 Most Consistent Attendees")
-                top_10 = leaderboard.head(10)[["rank", "name", "total_days", "on_time_percentage"]]
                 st.dataframe(
-                    top_10,
+                    insights["top_10_attendees"],
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "rank": "Rank",
-                        "name": "Name",
-                        "total_days": "Days Attended",
-                        "on_time_percentage": st.column_config.ProgressColumn(
+                        "Rank": "Rank",
+                        "Name": "Name",
+                        "Days Attended": "Days Attended",
+                        "On-Time %": st.column_config.ProgressColumn(
                             "On-Time %",
                             format="%.1f%%",
                             min_value=0,
@@ -524,36 +686,79 @@ if uploaded_files:
             
             with col2:
                 st.markdown("#### 📅 Attendance Distribution")
-                # Create attendance distribution bins
-                if not leaderboard.empty:
-                    # Calculate bins based on data
-                    max_days = leaderboard["total_days"].max()
-                    if max_days <= 10:
-                        bins = [0, 2, 4, 6, 8, 10, float('inf')]
-                        labels = ["0-2 days", "3-4 days", "5-6 days", "7-8 days", "9-10 days", "10+ days"]
-                    else:
-                        # For larger ranges, create more bins
-                        bin_step = max(1, max_days // 5)
-                        bins = list(range(0, max_days + bin_step, bin_step))
-                        if max_days not in bins:
-                            bins.append(max_days + 1)
-                        labels = [f"{bins[i]}-{bins[i+1]-1} days" for i in range(len(bins)-1)]
-                    
-                    leaderboard["attendance_range"] = pd.cut(
-                        leaderboard["total_days"], 
-                        bins=bins, 
-                        labels=labels, 
-                        right=False
-                    )
-                    
-                    distribution = leaderboard["attendance_range"].value_counts().sort_index().reset_index()
-                    distribution.columns = ["Days Attended", "Number of Staff"]
-                    
-                    st.dataframe(
-                        distribution,
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                st.dataframe(
+                    insights["attendance_distribution"],
+                    use_container_width=True,
+                    hide_index=True
+                )
+        
+        # ================== EXPORT SECTION ==================
+        st.markdown("---")
+        st.markdown("## 📤 Export Dashboard Report")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Generate comprehensive Excel report
+            excel_data = generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis, file_names, insights)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            st.download_button(
+                label="📊 Download Full Excel Report",
+                data=excel_data,
+                file_name=f"attendance_dashboard_report_{timestamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Download complete dashboard data in Excel format with multiple sheets"
+            )
+        
+        with col2:
+            # Download leaderboard only
+            leaderboard_csv = leaderboard.to_csv(index=False)
+            st.download_button(
+                label="📋 Download Leaderboard (CSV)",
+                data=leaderboard_csv,
+                file_name=f"attendance_leaderboard_{timestamp}.csv",
+                mime="text/csv",
+                help="Download only the attendance leaderboard in CSV format"
+            )
+        
+        with col3:
+            # Download summary report
+            summary_text = generate_dashboard_summary(df, leaderboard, kpis, file_names)
+            st.download_button(
+                label="📄 Download Summary Report (TXT)",
+                data=summary_text,
+                file_name=f"attendance_summary_{timestamp}.txt",
+                mime="text/plain",
+                help="Download a text summary of the dashboard findings"
+            )
+        
+        # ================== DATA PREVIEW ==================
+        with st.expander("🔍 Preview Export Data"):
+            tab1, tab2, tab3 = st.tabs(["Raw Data Sample", "Leaderboard", "KPIs"])
+            
+            with tab1:
+                st.dataframe(
+                    df[["date", "name", "department", "sign_in_time"]].head(10),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            with tab2:
+                st.dataframe(
+                    leaderboard.head(10),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            with tab3:
+                kpis_df = pd.DataFrame.from_dict(kpis, orient='index').reset_index()
+                kpis_df.columns = ["Metric", "Value"]
+                st.dataframe(
+                    kpis_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
         
         # ================== DATA SUMMARY ==================
         st.markdown("---")
@@ -598,6 +803,7 @@ else:
         2. **🏆 Combined Leaderboard**: Staff ranked across all periods
         3. **📅 Time Period Analysis**: Weekly and monthly trends
         4. **📈 Detailed Insights**: Top performers and distribution analysis
+        5. **📤 Export Options**: Download complete reports in multiple formats
         
         **Expected Excel Format:**
         - Each file should have columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT
@@ -619,4 +825,4 @@ else:
 
 # ================== FOOTER ==================
 st.markdown("---")
-st.caption("Staff Attendance Dashboard | Upload multiple Excel files for comprehensive attendance analysis")
+st.caption("Staff Attendance Dashboard | Upload multiple Excel files for comprehensive attendance analysis and export")
