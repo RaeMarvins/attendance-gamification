@@ -17,15 +17,25 @@ LATE_TIME = time(8, 0)  # 8:00 AM
 
 # ================== HEADER ==================
 st.title("Staff Attendance Dashboard")
-st.markdown("Upload multiple attendance Excel files to view comprehensive staff statistics across all periods.")
+st.markdown("Upload attendance files and staff list to compare attendance records.")
 
 # ================== FILE UPLOAD ==================
-uploaded_files = st.file_uploader(
-    "📤 Upload Attendance Excel Files",
-    type=["xlsx", "xls"],
-    accept_multiple_files=True,
-    help="Upload one or more Excel files with columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT"
-)
+col1, col2 = st.columns(2)
+
+with col1:
+    uploaded_files = st.file_uploader(
+        "📤 Upload Attendance Excel Files",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        help="Upload one or more Excel files with columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT"
+    )
+
+with col2:
+    staff_list_file = st.file_uploader(
+        "👥 Upload Staff Master List (Optional)",
+        type=["xlsx", "xls", "csv"],
+        help="Upload a master list of all staff members. Should have columns: Person ID, Name, Department"
+    )
 
 # ================== FUNCTIONS ==================
 def process_excel_file(file, file_name=""):
@@ -90,6 +100,47 @@ def process_excel_file(file, file_name=""):
         st.error(f"Error processing file {file_name}: {str(e)}")
         return pd.DataFrame()
 
+def process_staff_list(file):
+    """Process the staff master list file"""
+    try:
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_excel(file)
+        
+        # Standardize column names
+        df.columns = [col.lower().strip().replace(' ', '_') for col in df.columns]
+        
+        # Check for required columns
+        required_cols = ['name']
+        if 'person_id' not in df.columns and 'id' in df.columns:
+            df = df.rename(columns={'id': 'person_id'})
+        if 'department' not in df.columns and 'dept' in df.columns:
+            df = df.rename(columns={'dept': 'department'})
+        
+        # Keep only relevant columns
+        keep_cols = []
+        for col in ['person_id', 'name', 'department']:
+            if col in df.columns:
+                keep_cols.append(col)
+        
+        if len(keep_cols) == 0:
+            st.error("Staff list must contain at least 'name' column")
+            return pd.DataFrame()
+        
+        df = df[keep_cols].copy()
+        
+        # Clean data
+        df['name'] = df['name'].astype(str).str.strip().str.upper()
+        if 'department' in df.columns:
+            df['department'] = df['department'].astype(str).str.strip()
+        
+        return df.drop_duplicates()
+        
+    except Exception as e:
+        st.error(f"Error processing staff list: {str(e)}")
+        return pd.DataFrame()
+
 def combine_all_files(uploaded_files):
     """Combine data from all uploaded files"""
     all_data = []
@@ -108,10 +159,74 @@ def combine_all_files(uploaded_files):
     else:
         return pd.DataFrame(), file_names
 
-def calculate_kpis(df):
+def compare_staff_lists(attendance_df, staff_list_df):
+    """Compare attendance data with master staff list to identify non-attending staff"""
+    if attendance_df.empty or staff_list_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    
+    # Clean names for comparison (uppercase and strip)
+    attendance_df['name_clean'] = attendance_df['name'].astype(str).str.strip().str.upper()
+    staff_list_df['name_clean'] = staff_list_df['name'].astype(str).str.strip().str.upper()
+    
+    # Find staff who have signed in
+    attending_staff = attendance_df['name_clean'].unique()
+    
+    # Find all staff in master list
+    all_staff = staff_list_df['name_clean'].unique()
+    
+    # Identify non-attending staff
+    non_attending_mask = ~staff_list_df['name_clean'].isin(attending_staff)
+    non_attending_staff = staff_list_df[non_attending_mask].copy()
+    
+    # Get attending staff details from master list
+    attending_mask = staff_list_df['name_clean'].isin(attending_staff)
+    attending_from_master = staff_list_df[attending_mask].copy()
+    
+    # Get staff who signed in but not in master list (potential new staff)
+    attendance_only_mask = ~attendance_df['name_clean'].isin(all_staff)
+    attendance_only_staff = attendance_df[attendance_only_mask][['name', 'department']].drop_duplicates()
+    
+    # Merge attendance data with master list for analysis
+    merged_df = pd.merge(
+        staff_list_df,
+        attendance_df.groupby('name_clean').agg({
+            'sign_in_time': 'count',
+            'on_time': 'sum',
+            'late': 'sum'
+        }).reset_index(),
+        on='name_clean',
+        how='left'
+    )
+    
+    # Rename columns
+    merged_df = merged_df.rename(columns={
+        'sign_in_time': 'total_days',
+        'on_time': 'on_time_days',
+        'late': 'late_days'
+    })
+    
+    # Fill NaN values for non-attending staff
+    merged_df['total_days'] = merged_df['total_days'].fillna(0).astype(int)
+    merged_df['on_time_days'] = merged_df['on_time_days'].fillna(0).astype(int)
+    merged_df['late_days'] = merged_df['late_days'].fillna(0).astype(int)
+    
+    # Calculate on-time percentage
+    merged_df['on_time_percentage'] = merged_df.apply(
+        lambda x: round((x['on_time_days'] / x['total_days'] * 100), 1) if x['total_days'] > 0 else 0,
+        axis=1
+    )
+    
+    # Add attendance status
+    merged_df['attendance_status'] = merged_df['total_days'].apply(
+        lambda x: 'Regular' if x >= 3 else ('Occasional' if x > 0 else 'Non-Attending')
+    )
+    
+    return merged_df, non_attending_staff, attendance_only_staff
+
+def calculate_kpis(df, staff_list_df=None):
     """Calculate KPI metrics from the combined data"""
     if df.empty:
-        return {
+        base_kpis = {
             "total_staff": 0,
             "present_today": 0,
             "absent_today": 0,
@@ -125,9 +240,19 @@ def calculate_kpis(df):
             "total_days_covered": 0,
             "date_range": "N/A"
         }
+        
+        if staff_list_df is not None and not staff_list_df.empty:
+            base_kpis.update({
+                "total_staff_in_list": len(staff_list_df),
+                "attending_staff": 0,
+                "non_attending_staff": len(staff_list_df),
+                "attendance_rate": 0.0
+            })
+        
+        return base_kpis
     
-    # Get unique staff count
-    total_staff = df["name"].nunique()
+    # Get unique staff count from attendance data
+    attending_staff_count = df["name"].nunique()
     
     # Get today's date
     today = datetime.date.today()
@@ -137,9 +262,6 @@ def calculate_kpis(df):
     
     # Count present today (those who signed in)
     present_today = today_data["name"].nunique() if not today_data.empty else 0
-    
-    # Calculate absent today
-    absent_today = max(0, total_staff - present_today)
     
     # Calculate average sign-ins per staff
     signins_by_staff = df.groupby("name")["sign_in_time"].count()
@@ -155,7 +277,7 @@ def calculate_kpis(df):
     unique_dates = df["date"].dt.date.nunique()
     if unique_dates > 0:
         daily_attendance = df.groupby("date")["name"].nunique().mean()
-        avg_daily_attendance = round(daily_attendance / total_staff * 100, 1)
+        avg_daily_attendance = round(daily_attendance / attending_staff_count * 100, 1) if attending_staff_count > 0 else 0.0
     else:
         avg_daily_attendance = 0.0
     
@@ -165,10 +287,10 @@ def calculate_kpis(df):
     date_range = f"{min_date.strftime('%b %d, %Y')} to {max_date.strftime('%b %d, %Y')}"
     total_days_covered = (max_date - min_date).days + 1
     
-    return {
-        "total_staff": total_staff,
+    kpis = {
+        "total_staff": attending_staff_count,
         "present_today": present_today,
-        "absent_today": absent_today,
+        "absent_today": 0,  # Will be calculated below if staff list is provided
         "avg_signins": avg_signins,
         "today": today,
         "total_on_time": total_on_time,
@@ -179,54 +301,36 @@ def calculate_kpis(df):
         "total_days_covered": total_days_covered,
         "date_range": date_range
     }
+    
+    # Add staff list comparison metrics if staff list is provided
+    if staff_list_df is not None and not staff_list_df.empty:
+        total_staff_in_list = len(staff_list_df)
+        non_attending_count = total_staff_in_list - attending_staff_count
+        attendance_rate = round((attending_staff_count / total_staff_in_list) * 100, 1) if total_staff_in_list > 0 else 0
+        
+        kpis.update({
+            "total_staff_in_list": total_staff_in_list,
+            "attending_staff": attending_staff_count,
+            "non_attending_staff": max(0, non_attending_count),
+            "attendance_rate": attendance_rate,
+            "absent_today": max(0, total_staff_in_list - present_today)
+        })
+    
+    return kpis
 
-def create_attendance_leaderboard(df):
-    """Create a leaderboard of staff ranked by attendance and punctuality from combined data"""
-    if df.empty:
+def create_attendance_leaderboard(merged_df):
+    """Create a leaderboard of staff ranked by attendance and punctuality"""
+    if merged_df.empty:
         return pd.DataFrame()
     
-    # Calculate total days, on-time days, and late days for each staff member
-    attendance_stats = df.groupby(["name", "department"]).agg({
-        "sign_in_time": "count",
-        "on_time": "sum",
-        "late": "sum"
-    }).reset_index()
+    # Calculate average sign-in time if we have the detailed data
+    # This would require access to the detailed attendance data
+    # For now, we'll work with the merged dataframe
     
-    attendance_stats.columns = ["name", "department", "total_days", "on_time_days", "late_days"]
-    
-    # Calculate average sign-in time for each staff member
-    def time_to_minutes(t):
-        if pd.isna(t):
-            return np.nan
-        return t.hour * 60 + t.minute
-    
-    df["sign_in_minutes"] = df["sign_in_time"].apply(time_to_minutes)
-    
-    avg_times = df.groupby("name")["sign_in_minutes"].mean().reset_index()
-    avg_times.columns = ["name", "avg_minutes"]
-    
-    # Merge average times with attendance stats
-    leaderboard = pd.merge(attendance_stats, avg_times, on="name", how="left")
-    
-    # Convert average minutes back to time string
-    def format_time(minutes):
-        if np.isnan(minutes):
-            return "N/A"
-        # Round to nearest minute
-        minutes = int(round(minutes))
-        return f"{minutes//60:02d}:{minutes%60:02d}"
-    
-    leaderboard["avg_signin_time"] = leaderboard["avg_minutes"].apply(format_time)
-    
-    # Calculate on-time percentage
-    leaderboard["on_time_percentage"] = round(
-        (leaderboard["on_time_days"] / leaderboard["total_days"]) * 100, 1
-    )
-    
-    # Sort by total days descending, then by average sign-in time ascending (earlier is better)
-    leaderboard = leaderboard.sort_values(
-        by=["total_days", "avg_minutes"], 
-        ascending=[False, True]
+    # Sort by total days descending, then by on-time percentage descending
+    leaderboard = merged_df.sort_values(
+        by=["total_days", "on_time_percentage"], 
+        ascending=[False, False]
     ).reset_index(drop=True)
     
     # Add rank
@@ -235,9 +339,12 @@ def create_attendance_leaderboard(df):
     # Select and order columns
     display_cols = [
         "rank", "name", "department", "total_days", 
-        "avg_signin_time", "on_time_percentage", 
-        "on_time_days", "late_days"
+        "on_time_percentage", "on_time_days", "late_days",
+        "attendance_status"
     ]
+    
+    # Only include columns that exist
+    display_cols = [col for col in display_cols if col in leaderboard.columns]
     
     return leaderboard[display_cols]
 
@@ -287,217 +394,6 @@ def create_time_period_report(df, period_type="week"):
     
     return period_stats
 
-def create_detailed_insights(df, leaderboard):
-    """Create detailed insights data"""
-    if df.empty or leaderboard.empty:
-        return {
-            "top_10_attendees": pd.DataFrame(),
-            "attendance_distribution": pd.DataFrame(),
-            "department_summary": pd.DataFrame()
-        }
-    
-    # Top 10 most consistent attendees
-    top_10 = leaderboard.head(10)[["rank", "name", "total_days", "on_time_percentage"]].copy()
-    top_10.columns = ["Rank", "Name", "Days Attended", "On-Time %"]
-    
-    # Attendance distribution - FIXED BIN CREATION
-    max_days = leaderboard["total_days"].max()
-    
-    if max_days <= 10:
-        bins = [0, 2, 4, 6, 8, 10]
-        labels = ["0-1 days", "2-3 days", "4-5 days", "6-7 days", "8-9 days", "10+ days"]
-    else:
-        # Create bins with unique values
-        bin_step = max(1, max_days // 5)
-        bins = list(range(0, max_days + bin_step, bin_step))
-        # Ensure bins are unique and increasing
-        bins = sorted(set(bins))
-        # Make sure last bin covers max_days
-        if bins[-1] <= max_days:
-            bins.append(bins[-1] + bin_step)
-        
-        # Create labels
-        labels = []
-        for i in range(len(bins)-1):
-            if i == len(bins)-2:
-                labels.append(f"{bins[i]}+ days")
-            else:
-                labels.append(f"{bins[i]}-{bins[i+1]-1} days")
-    
-    leaderboard_copy = leaderboard.copy()
-    leaderboard_copy["attendance_range"] = pd.cut(
-        leaderboard_copy["total_days"], 
-        bins=bins, 
-        labels=labels, 
-        right=False,
-        include_lowest=True
-    )
-    
-    distribution = leaderboard_copy["attendance_range"].value_counts().sort_index().reset_index()
-    distribution.columns = ["Days Attended Range", "Number of Staff"]
-    
-    # Department summary
-    dept_summary = df.groupby("department").agg({
-        "name": "nunique",
-        "sign_in_time": "count",
-        "on_time": "sum",
-        "late": "sum"
-    }).reset_index()
-    
-    dept_summary.columns = ["Department", "Staff Count", "Total Sign-Ins", "On-Time", "Late"]
-    dept_summary["On-Time %"] = round((dept_summary["On-Time"] / dept_summary["Total Sign-Ins"]) * 100, 1)
-    
-    return {
-        "top_10_attendees": top_10,
-        "attendance_distribution": distribution,
-        "department_summary": dept_summary
-    }
-
-def generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis, file_names, insights):
-    """Generate a comprehensive Excel export with multiple sheets"""
-    output = BytesIO()
-    
-    try:
-        # Try using openpyxl engine which is more commonly available
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Write KPIs summary sheet
-            kpis_df = pd.DataFrame.from_dict(kpis, orient='index').reset_index()
-            kpis_df.columns = ["Metric", "Value"]
-            kpis_df.to_excel(writer, sheet_name="KPIs Summary", index=False)
-            
-            # Write leaderboard
-            leaderboard.to_excel(writer, sheet_name="Attendance Leaderboard", index=False)
-            
-            # Write raw data
-            df[["date", "name", "department", "sign_in_time", "day", "source_file"]].to_excel(
-                writer, sheet_name="Raw Attendance Data", index=False
-            )
-            
-            # Write weekly report
-            if not weekly_report.empty:
-                weekly_report.to_excel(writer, sheet_name="Weekly Analysis", index=False)
-            
-            # Write monthly report
-            if not monthly_report.empty:
-                monthly_report.to_excel(writer, sheet_name="Monthly Analysis", index=False)
-            
-            # Write insights
-            if not insights["top_10_attendees"].empty:
-                insights["top_10_attendees"].to_excel(writer, sheet_name="Top 10 Attendees", index=False)
-            
-            if not insights["attendance_distribution"].empty:
-                insights["attendance_distribution"].to_excel(writer, sheet_name="Attendance Distribution", index=False)
-            
-            if not insights["department_summary"].empty:
-                insights["department_summary"].to_excel(writer, sheet_name="Department Summary", index=False)
-            
-            # Write file list
-            files_df = pd.DataFrame(file_names, columns=["Uploaded Files"])
-            files_df.to_excel(writer, sheet_name="Files Processed", index=False)
-            
-    except Exception as e:
-        st.warning(f"Excel export limited: {str(e)}")
-        # Create a simple CSV-based export instead
-        return None
-    
-    output.seek(0)
-    return output.getvalue()
-
-def generate_dashboard_summary(df, leaderboard, kpis, file_names):
-    """Generate a text summary of the dashboard"""
-    summary = f"""
-    STAFF ATTENDANCE DASHBOARD REPORT
-    =================================
-    
-    Report Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    Data Period: {kpis['date_range']} ({kpis['total_days_covered']} days)
-    Files Processed: {len(file_names)}
-    
-    KEY PERFORMANCE INDICATORS
-    --------------------------
-    • Total Staff: {kpis['total_staff']}
-    • Daily Attendance Rate: {kpis['avg_daily_attendance']}%
-    • On-Time Rate: {kpis['on_time_rate']}%
-    • Average Sign-Ins per Staff: {kpis['avg_signins']}
-    • Total Sign-Ins: {kpis['total_signins']:,}
-    
-    TOP 5 PERFORMERS
-    -----------------
-    """
-    
-    if not leaderboard.empty:
-        for i in range(min(5, len(leaderboard))):
-            staff = leaderboard.iloc[i]
-            summary += f"{i+1}. {staff['name']} - {staff['total_days']} days ({staff['on_time_percentage']}% on-time)\n"
-    
-    summary += f"""
-    
-    ATTENDANCE DISTRIBUTION
-    ------------------------
-    • Perfect Attendance (No Late Days): {len(leaderboard[leaderboard['late_days'] == 0]) if not leaderboard.empty else 0} staff
-    • Average Days per Staff: {round(leaderboard['total_days'].mean(), 1) if not leaderboard.empty else 0} days
-    • Median Days per Staff: {leaderboard['total_days'].median() if not leaderboard.empty else 0} days
-    
-    PUNCTUALITY OVERVIEW
-    --------------------
-    """
-    
-    if not leaderboard.empty and len(leaderboard) > 0:
-        summary += f"""• Average Sign-In Time: {leaderboard['avg_signin_time'].iloc[0] if len(leaderboard) > 0 else 'N/A'} (earliest)
-    • Best On-Time Rate: {leaderboard['on_time_percentage'].max() if not leaderboard.empty else 0}%
-    • Average On-Time Rate: {round(leaderboard['on_time_percentage'].mean(), 1) if not leaderboard.empty else 0}%
-    """
-    
-    summary += f"""
-    
-    DATA QUALITY
-    ------------
-    • Total Records: {len(df):,}
-    • Unique Dates: {df['date'].dt.date.nunique() if not df.empty else 0}
-    • Files Processed: {len(file_names)}
-    """
-    
-    return summary
-
-def create_csv_export(df, leaderboard, weekly_report, monthly_report, insights):
-    """Create a zip file containing multiple CSV files"""
-    zip_buffer = BytesIO()
-    
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        # Add leaderboard
-        leaderboard_csv = leaderboard.to_csv(index=False)
-        zip_file.writestr("attendance_leaderboard.csv", leaderboard_csv)
-        
-        # Add raw data
-        raw_data_csv = df[["date", "name", "department", "sign_in_time", "day", "source_file"]].to_csv(index=False)
-        zip_file.writestr("raw_attendance_data.csv", raw_data_csv)
-        
-        # Add weekly report
-        if not weekly_report.empty:
-            weekly_csv = weekly_report.to_csv(index=False)
-            zip_file.writestr("weekly_analysis.csv", weekly_csv)
-        
-        # Add monthly report
-        if not monthly_report.empty:
-            monthly_csv = monthly_report.to_csv(index=False)
-            zip_file.writestr("monthly_analysis.csv", monthly_csv)
-        
-        # Add insights
-        if not insights["top_10_attendees"].empty:
-            top10_csv = insights["top_10_attendees"].to_csv(index=False)
-            zip_file.writestr("top_10_attendees.csv", top10_csv)
-        
-        if not insights["attendance_distribution"].empty:
-            dist_csv = insights["attendance_distribution"].to_csv(index=False)
-            zip_file.writestr("attendance_distribution.csv", dist_csv)
-        
-        if not insights["department_summary"].empty:
-            dept_csv = insights["department_summary"].to_csv(index=False)
-            zip_file.writestr("department_summary.csv", dept_csv)
-    
-    zip_buffer.seek(0)
-    return zip_buffer.getvalue()
-
 # ================== MAIN ==================
 if uploaded_files:
     # Process all uploaded files
@@ -506,23 +402,113 @@ if uploaded_files:
     
     if not df.empty:
         # File upload summary
-        st.success(f"✅ Successfully processed {len(file_names)} file(s)")
+        st.success(f"✅ Successfully processed {len(file_names)} attendance file(s)")
         
-        with st.expander("📁 View Uploaded Files"):
-            for i, file_name in enumerate(file_names, 1):
-                st.write(f"{i}. {file_name}")
+        # Process staff list if provided
+        staff_list_df = pd.DataFrame()
+        if staff_list_file is not None:
+            with st.spinner("Processing staff list..."):
+                staff_list_df = process_staff_list(staff_list_file)
+            if not staff_list_df.empty:
+                st.success(f"✅ Processed staff list with {len(staff_list_df)} staff members")
         
-        # Calculate KPIs from combined data
-        kpis = calculate_kpis(df)
+        # Compare staff lists if staff list is provided
+        merged_df = pd.DataFrame()
+        non_attending_staff = pd.DataFrame()
+        attendance_only_staff = pd.DataFrame()
         
-        # Generate reports
-        leaderboard = create_attendance_leaderboard(df)
-        weekly_report = create_time_period_report(df, period_type="week")
-        monthly_report = create_time_period_report(df, period_type="month")
-        insights = create_detailed_insights(df, leaderboard)
+        if not staff_list_df.empty:
+            merged_df, non_attending_staff, attendance_only_staff = compare_staff_lists(df, staff_list_df)
+        
+        # Calculate KPIs
+        kpis = calculate_kpis(df, staff_list_df)
+        
+        # ================== STAFF COMPARISON SECTION ==================
+        if not staff_list_df.empty:
+            st.markdown("---")
+            st.markdown("### 👥 Staff Attendance Comparison")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    label="Total Staff in List",
+                    value=kpis.get("total_staff_in_list", 0),
+                    help="Total staff members in master list"
+                )
+            
+            with col2:
+                st.metric(
+                    label="Staff Who Signed In",
+                    value=kpis.get("attending_staff", kpis["total_staff"]),
+                    delta=f"{kpis.get('attendance_rate', 0)}% attendance rate",
+                    help="Staff members who have signed in at least once"
+                )
+            
+            with col3:
+                non_attending_count = kpis.get("non_attending_staff", 0)
+                st.metric(
+                    label="Never Signed In",
+                    value=non_attending_count,
+                    delta=f"{non_attending_count} staff",
+                    help="Staff members who have never signed in"
+                )
+            
+            with col4:
+                if not attendance_only_staff.empty:
+                    st.metric(
+                        label="Not in Master List",
+                        value=len(attendance_only_staff),
+                        help="Staff who signed in but not in master list"
+                    )
+                else:
+                    st.metric(
+                        label="All Staff Accounted",
+                        value="✓",
+                        help="All signing staff are in master list"
+                    )
+            
+            # Display non-attending staff
+            if not non_attending_staff.empty:
+                with st.expander("📋 View Staff Who Never Signed In", expanded=True):
+                    st.dataframe(
+                        non_attending_staff,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "name": "Staff Name",
+                            "department": "Department",
+                            "person_id": "ID"
+                        }
+                    )
+                    
+                    # Add download option for non-attending staff
+                    csv_data = non_attending_staff.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Non-Attending Staff List",
+                        data=csv_data,
+                        file_name="non_attending_staff.csv",
+                        mime="text/csv",
+                        help="Download list of staff who never signed in"
+                    )
+            
+            # Display staff who signed in but not in master list
+            if not attendance_only_staff.empty:
+                with st.expander("📝 View Staff Not in Master List", expanded=True):
+                    st.info("These staff members signed in but are not in the master list. They may be new hires or need to be added to the master list.")
+                    st.dataframe(
+                        attendance_only_staff,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "name": "Staff Name",
+                            "department": "Department"
+                        }
+                    )
         
         # ================== KPI METRICS ==================
-        st.markdown("### 📊 Combined Attendance Overview")
+        st.markdown("---")
+        st.markdown("### 📊 Attendance Overview")
         st.caption(f"Data Range: {kpis['date_range']} ({kpis['total_days_covered']} days)")
         
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -531,7 +517,7 @@ if uploaded_files:
             st.metric(
                 label="Total Staff",
                 value=kpis["total_staff"],
-                help="Number of unique staff members across all files"
+                help="Number of unique staff members in attendance data"
             )
         
         with col2:
@@ -564,65 +550,91 @@ if uploaded_files:
                 help="Total number of sign-ins across all periods"
             )
         
-        st.markdown("---")
-        
         # ================== ATTENDANCE LEADERBOARD ==================
-        st.markdown("### 🏆 Combined Attendance & Punctuality Leaderboard")
-        st.markdown(f"**Based on {kpis['total_days_covered']} days of data across all uploaded files**")
+        st.markdown("---")
+        st.markdown("### 🏆 Attendance Leaderboard")
+        
+        # Use merged_df if available, otherwise use attendance data
+        if not merged_df.empty:
+            leaderboard = create_attendance_leaderboard(merged_df)
+        else:
+            # Create basic leaderboard from attendance data only
+            attendance_stats = df.groupby(["name", "department"]).agg({
+                "sign_in_time": "count",
+                "on_time": "sum",
+                "late": "sum"
+            }).reset_index()
+            
+            attendance_stats.columns = ["name", "department", "total_days", "on_time_days", "late_days"]
+            attendance_stats["on_time_percentage"] = round(
+                (attendance_stats["on_time_days"] / attendance_stats["total_days"]) * 100, 1
+            )
+            attendance_stats["attendance_status"] = attendance_stats["total_days"].apply(
+                lambda x: 'Regular' if x >= 3 else ('Occasional' if x > 0 else 'Non-Attending')
+            )
+            
+            leaderboard = attendance_stats.sort_values("total_days", ascending=False).reset_index(drop=True)
+            leaderboard.insert(0, "rank", range(1, len(leaderboard) + 1))
         
         if not leaderboard.empty:
             # Display leaderboard with progress bars for on-time percentage
+            column_config = {
+                "rank": st.column_config.NumberColumn("Rank", width="small"),
+                "name": st.column_config.TextColumn("Employee Name", width="medium"),
+                "department": st.column_config.TextColumn("Department", width="medium"),
+                "total_days": st.column_config.NumberColumn(
+                    "Total Days",
+                    width="small",
+                    help="Total number of days signed in"
+                ),
+                "on_time_percentage": st.column_config.ProgressColumn(
+                    "On-Time %", 
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=100,
+                    width="medium",
+                    help="Percentage of days signed in before 8:00 AM"
+                ),
+                "on_time_days": st.column_config.NumberColumn(
+                    "On-Time Days", 
+                    width="small",
+                    help="Number of days signed in before 8:00 AM"
+                ),
+                "late_days": st.column_config.NumberColumn(
+                    "Late Days", 
+                    width="small",
+                    help="Number of days signed in after 8:00 AM"
+                )
+            }
+            
+            # Add attendance status column if it exists
+            if "attendance_status" in leaderboard.columns:
+                column_config["attendance_status"] = st.column_config.TextColumn(
+                    "Status",
+                    width="small",
+                    help="Attendance pattern: Regular (3+ days), Occasional (1-2 days), Non-Attending (0 days)"
+                )
+            
             st.dataframe(
                 leaderboard,
                 use_container_width=True,
                 hide_index=True,
-                column_config={
-                    "rank": st.column_config.NumberColumn("Rank", width="small"),
-                    "name": st.column_config.TextColumn("Employee Name", width="medium"),
-                    "department": st.column_config.TextColumn("Department", width="medium"),
-                    "total_days": st.column_config.NumberColumn(
-                        "Total Days",
-                        width="small",
-                        help="Total number of days signed in across all files"
-                    ),
-                    "avg_signin_time": st.column_config.TextColumn(
-                        "Avg Sign-In Time", 
-                        width="small",
-                        help="Average time of sign-in across all days and files"
-                    ),
-                    "on_time_percentage": st.column_config.ProgressColumn(
-                        "On-Time %", 
-                        format="%.1f%%",
-                        min_value=0,
-                        max_value=100,
-                        width="medium",
-                        help="Percentage of days signed in before 8:00 AM"
-                    ),
-                    "on_time_days": st.column_config.NumberColumn(
-                        "On-Time Days", 
-                        width="small",
-                        help="Number of days signed in before 8:00 AM"
-                    ),
-                    "late_days": st.column_config.NumberColumn(
-                        "Late Days", 
-                        width="small",
-                        help="Number of days signed in after 8:00 AM"
-                    )
-                }
+                column_config=column_config
             )
             
             # Add leaderboard statistics
-            st.markdown("#### 📈 Combined Leaderboard Statistics")
+            st.markdown("#### 📈 Leaderboard Statistics")
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                top_performer = leaderboard.iloc[0]
-                st.metric(
-                    "Top Performer", 
-                    top_performer["name"].split()[0],
-                    delta=f"{top_performer['total_days']} days",
-                    help=f"{top_performer['name']} leads with {top_performer['total_days']} total days attended"
-                )
+                if len(leaderboard) > 0:
+                    top_performer = leaderboard.iloc[0]
+                    st.metric(
+                        "Top Performer", 
+                        top_performer["name"].split()[0] if isinstance(top_performer["name"], str) else "N/A",
+                        delta=f"{top_performer['total_days']} days",
+                        help="Staff with most days attended"
+                    )
             
             with col2:
                 avg_days = round(leaderboard["total_days"].mean(), 1)
@@ -633,201 +645,129 @@ if uploaded_files:
                 )
             
             with col3:
-                perfect_attendance = len(leaderboard[leaderboard["late_days"] == 0])
-                st.metric(
-                    "Perfect Attendance", 
-                    perfect_attendance,
-                    help="Number of staff with zero late days"
-                )
+                if "attendance_status" in leaderboard.columns:
+                    regular_count = len(leaderboard[leaderboard["attendance_status"] == "Regular"])
+                    st.metric(
+                        "Regular Attendees", 
+                        regular_count,
+                        help="Staff who attended 3+ days"
+                    )
             
             with col4:
-                best_punctuality = leaderboard["on_time_percentage"].max()
+                best_punctuality = leaderboard["on_time_percentage"].max() if "on_time_percentage" in leaderboard.columns else 0
                 st.metric(
                     "Best On-Time Rate", 
                     f"{best_punctuality}%",
                     help="Highest on-time percentage achieved"
                 )
         
+        # ================== ATTENDANCE DISTRIBUTION ==================
         st.markdown("---")
+        st.markdown("### 📊 Attendance Distribution")
         
-        # ================== TIME PERIOD ANALYSIS ==================
-        st.markdown("### 📅 Time Period Analysis")
+        col1, col2 = st.columns(2)
         
-        tab1, tab2 = st.tabs(["Weekly Analysis", "Monthly Analysis"])
-        
-        with tab1:
-            st.markdown("#### 📊 Weekly Attendance Trends")
-            if not weekly_report.empty:
+        with col1:
+            # Create attendance frequency distribution
+            if not leaderboard.empty and "total_days" in leaderboard.columns:
+                st.markdown("#### Days Attended Distribution")
+                
+                # Create bins for attendance days
+                max_days = leaderboard["total_days"].max()
+                if max_days <= 5:
+                    bins = [0, 1, 2, 3, 4, 5]
+                    labels = ["0 days", "1 day", "2 days", "3 days", "4 days", "5+ days"]
+                else:
+                    bin_step = max(1, max_days // 5)
+                    bins = list(range(0, max_days + bin_step, bin_step))
+                    bins = sorted(set(bins))
+                    labels = [f"{bins[i]}-{bins[i+1]-1} days" if i < len(bins)-2 else f"{bins[i]}+ days" 
+                             for i in range(len(bins)-1)]
+                
+                leaderboard_copy = leaderboard.copy()
+                leaderboard_copy["attendance_range"] = pd.cut(
+                    leaderboard_copy["total_days"], 
+                    bins=bins, 
+                    labels=labels, 
+                    right=False,
+                    include_lowest=True
+                )
+                
+                distribution = leaderboard_copy["attendance_range"].value_counts().sort_index().reset_index()
+                distribution.columns = ["Days Attended", "Number of Staff"]
+                
                 st.dataframe(
-                    weekly_report,
+                    distribution,
                     use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Week": st.column_config.TextColumn("Week", width="small"),
-                        "Unique Staff": st.column_config.NumberColumn("Staff Count", width="small"),
-                        "Total Sign-Ins": st.column_config.NumberColumn("Total Sign-Ins", width="small"),
-                        "On-Time": st.column_config.NumberColumn("On-Time", width="small"),
-                        "Late": st.column_config.NumberColumn("Late", width="small"),
-                        "On-Time %": st.column_config.ProgressColumn(
-                            "On-Time %",
-                            format="%.1f%%",
-                            min_value=0,
-                            max_value=100,
-                            width="medium"
-                        ),
-                        "Attendance Rate %": st.column_config.ProgressColumn(
-                            "Attendance %",
-                            format="%.1f%%",
-                            min_value=0,
-                            max_value=100,
-                            width="medium"
-                        )
-                    }
+                    hide_index=True
                 )
         
-        with tab2:
-            st.markdown("#### 📊 Monthly Attendance Trends")
-            if not monthly_report.empty:
-                st.dataframe(
-                    monthly_report,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Month": st.column_config.TextColumn("Month", width="small"),
-                        "Unique Staff": st.column_config.NumberColumn("Staff Count", width="small"),
-                        "Total Sign-Ins": st.column_config.NumberColumn("Total Sign-Ins", width="small"),
-                        "On-Time": st.column_config.NumberColumn("On-Time", width="small"),
-                        "Late": st.column_config.NumberColumn("Late", width="small"),
-                        "On-Time %": st.column_config.ProgressColumn(
-                            "On-Time %",
-                            format="%.1f%%",
-                            min_value=0,
-                            max_value=100,
-                            width="medium"
-                        ),
-                        "Attendance Rate %": st.column_config.ProgressColumn(
-                            "Attendance %",
-                            format="%.1f%%",
-                            min_value=0,
-                            max_value=100,
-                            width="medium"
-                        )
-                    }
-                )
-        
-        # ================== ADDITIONAL INSIGHTS ==================
-        with st.expander("📈 View Detailed Insights"):
-            col1, col2 = st.columns(2)
+        with col2:
+            # Show summary statistics
+            st.markdown("#### Attendance Summary")
             
-            with col1:
-                st.markdown("#### 🏆 Top 10 Most Consistent Attendees")
-                if not insights["top_10_attendees"].empty:
-                    st.dataframe(
-                        insights["top_10_attendees"],
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "Rank": "Rank",
-                            "Name": "Name",
-                            "Days Attended": "Days Attended",
-                            "On-Time %": st.column_config.ProgressColumn(
-                                "On-Time %",
-                                format="%.1f%%",
-                                min_value=0,
-                                max_value=100
-                            )
-                        }
-                    )
+            summary_data = []
             
-            with col2:
-                st.markdown("#### 📅 Attendance Distribution")
-                if not insights["attendance_distribution"].empty:
-                    st.dataframe(
-                        insights["attendance_distribution"],
-                        use_container_width=True,
-                        hide_index=True
-                    )
+            if not staff_list_df.empty:
+                summary_data.append(["Staff in Master List", kpis.get("total_staff_in_list", "N/A")])
+                summary_data.append(["Staff Who Attended", kpis.get("attending_staff", kpis["total_staff"])])
+                summary_data.append(["Never Attended", kpis.get("non_attending_staff", 0)])
+                summary_data.append(["Attendance Rate", f"{kpis.get('attendance_rate', 0)}%"])
+            
+            summary_data.append(["Average Days/Staff", f"{kpis['avg_signins']}"])
+            summary_data.append(["On-Time Rate", f"{kpis['on_time_rate']}%"])
+            summary_data.append(["Data Days Covered", kpis["total_days_covered"]])
+            summary_data.append(["Total Sign-Ins", f"{kpis['total_signins']:,}"])
+            
+            summary_df = pd.DataFrame(summary_data, columns=["Metric", "Value"])
+            st.dataframe(
+                summary_df,
+                use_container_width=True,
+                hide_index=True
+            )
         
         # ================== EXPORT SECTION ==================
         st.markdown("---")
-        st.markdown("## 📤 Export Dashboard Report")
+        st.markdown("## 📤 Export Reports")
         
-        col1, col2, col3, col4 = st.columns(4)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            # Generate comprehensive Excel report
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            excel_data = generate_export_package(df, leaderboard, weekly_report, monthly_report, kpis, file_names, insights)
-            
-            if excel_data:
+            # Export combined report
+            if not merged_df.empty:
+                combined_csv = merged_df.to_csv(index=False)
                 st.download_button(
-                    label="📊 Download Excel Report",
-                    data=excel_data,
-                    file_name=f"attendance_dashboard_{timestamp}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Download complete dashboard data in Excel format"
+                    label="📊 Download Full Comparison",
+                    data=combined_csv,
+                    file_name=f"staff_attendance_comparison_{timestamp}.csv",
+                    mime="text/csv",
+                    help="Download complete staff comparison data"
                 )
-            else:
-                st.info("Excel export requires openpyxl. Use CSV Package instead.")
         
         with col2:
-            # Download CSV zip package
-            csv_zip = create_csv_export(df, leaderboard, weekly_report, monthly_report, insights)
-            st.download_button(
-                label="📁 Download CSV Package (ZIP)",
-                data=csv_zip,
-                file_name=f"attendance_data_{timestamp}.zip",
-                mime="application/zip",
-                help="Download all data as CSV files in a ZIP archive"
-            )
+            # Export non-attending staff list
+            if not non_attending_staff.empty:
+                non_attending_csv = non_attending_staff.to_csv(index=False)
+                st.download_button(
+                    label="📋 Download Non-Attending List",
+                    data=non_attending_csv,
+                    file_name=f"non_attending_staff_{timestamp}.csv",
+                    mime="text/csv",
+                    help="Download list of staff who never signed in"
+                )
         
         with col3:
-            # Download leaderboard only
-            leaderboard_csv = leaderboard.to_csv(index=False)
-            st.download_button(
-                label="📋 Download Leaderboard",
-                data=leaderboard_csv,
-                file_name=f"attendance_leaderboard_{timestamp}.csv",
-                mime="text/csv",
-                help="Download only the attendance leaderboard"
-            )
-        
-        with col4:
-            # Download summary report
-            summary_text = generate_dashboard_summary(df, leaderboard, kpis, file_names)
-            st.download_button(
-                label="📄 Download Summary",
-                data=summary_text,
-                file_name=f"attendance_summary_{timestamp}.txt",
-                mime="text/plain",
-                help="Download a text summary of the dashboard findings"
-            )
-        
-        # ================== DATA PREVIEW ==================
-        with st.expander("🔍 Preview Export Data"):
-            tab1, tab2, tab3 = st.tabs(["Raw Data Sample", "Leaderboard", "KPIs"])
-            
-            with tab1:
-                st.dataframe(
-                    df[["date", "name", "department", "sign_in_time"]].head(10),
-                    use_container_width=True,
-                    hide_index=True
-                )
-            
-            with tab2:
-                st.dataframe(
-                    leaderboard.head(10),
-                    use_container_width=True,
-                    hide_index=True
-                )
-            
-            with tab3:
-                kpis_df = pd.DataFrame.from_dict(kpis, orient='index').reset_index()
-                kpis_df.columns = ["Metric", "Value"]
-                st.dataframe(
-                    kpis_df,
-                    use_container_width=True,
-                    hide_index=True
+            # Export attendance-only staff
+            if not attendance_only_staff.empty:
+                attendance_only_csv = attendance_only_staff.to_csv(index=False)
+                st.download_button(
+                    label="👤 Download New Staff List",
+                    data=attendance_only_csv,
+                    file_name=f"new_staff_list_{timestamp}.csv",
+                    mime="text/csv",
+                    help="Download staff who signed in but not in master list"
                 )
         
         # ================== DATA SUMMARY ==================
@@ -840,14 +780,14 @@ if uploaded_files:
             st.metric(
                 "Files Processed",
                 len(file_names),
-                help="Number of Excel files successfully processed"
+                help="Number of attendance files processed"
             )
         
         with col2:
             st.metric(
-                "Data Period",
-                f"{kpis['total_days_covered']} days",
-                help="Total days covered in the data"
+                "Staff Records",
+                f"{kpis['total_staff']} / {kpis.get('total_staff_in_list', kpis['total_staff'])}",
+                help="Attending staff / Total staff in list"
             )
         
         with col3:
@@ -862,29 +802,38 @@ if uploaded_files:
         
 else:
     # ================== PLACEHOLDER UI ==================
-    st.info("👆 Upload one or more attendance Excel files to view the dashboard")
+    st.info("👆 Upload attendance Excel files to begin analysis")
     
-    # Example of the dashboard layout
-    with st.expander("📋 What to expect after upload"):
+    # Instructions
+    with st.expander("📋 How to use this dashboard"):
         st.markdown("""
-        After uploading your Excel files, you'll see:
+        ### **Dashboard Features:**
         
-        1. **📊 Combined Overview**: Key metrics from all uploaded files
-        2. **🏆 Combined Leaderboard**: Staff ranked across all periods
-        3. **📅 Time Period Analysis**: Weekly and monthly trends
-        4. **📈 Detailed Insights**: Top performers and distribution analysis
-        5. **📤 Export Options**: Download complete reports in multiple formats
+        1. **Staff Comparison**: Upload a master staff list to compare against attendance records
+        2. **Identify Non-Attending Staff**: Find staff who are in the master list but never signed in
+        3. **Find New Staff**: Identify staff who signed in but aren't in the master list
+        4. **Attendance Analysis**: View detailed attendance patterns and punctuality
         
-        **Expected Excel Format:**
-        - Each file should have columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT
+        ### **File Requirements:**
+        
+        **Attendance Files:**
+        - Excel files with columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT
         - Date format: MM/DD/YYYY
         - Time format: HH:MM (24-hour)
-        - Can have sign-in and sign-out on separate rows
-        - Files can be from different time periods
+        
+        **Staff Master List (Optional):**
+        - Excel or CSV file with columns: Name (required), Person ID, Department
+        - Helps identify staff who never sign in
+        
+        ### **Expected Outputs:**
+        - List of staff who never signed in
+        - List of new staff not in master list
+        - Attendance leaderboard
+        - Detailed attendance statistics
         """)
     
     # Placeholder metrics
-    st.markdown("### 📊 Combined Attendance Overview")
+    st.markdown("### 📊 Attendance Overview")
     col1, col2, col3, col4, col5 = st.columns(5)
     
     for col, value, label in zip([col1, col2, col3, col4, col5], 
@@ -895,4 +844,4 @@ else:
 
 # ================== FOOTER ==================
 st.markdown("---")
-st.caption("Staff Attendance Dashboard | Upload multiple Excel files for comprehensive attendance analysis and export")
+st.caption("Staff Attendance Dashboard with Staff Comparison | Upload master list to identify non-attending staff")
