@@ -30,37 +30,46 @@ st.markdown("""
     .excellent {
         background-color: #d4edda;
         color: #155724;
-        padding: 5px 10px;
+        padding: 10px 15px;
         border-radius: 20px;
         font-weight: bold;
         text-align: center;
         border-left: 5px solid #28a745;
+        margin: 5px 0;
     }
     .needs-monitoring {
         background-color: #fff3cd;
         color: #856404;
-        padding: 5px 10px;
+        padding: 10px 15px;
         border-radius: 20px;
         font-weight: bold;
         text-align: center;
         border-left: 5px solid #ffc107;
+        margin: 5px 0;
     }
     .intervention {
         background-color: #f8d7da;
         color: #721c24;
-        padding: 5px 10px;
+        padding: 10px 15px;
         border-radius: 20px;
         font-weight: bold;
         text-align: center;
         border-left: 5px solid #dc3545;
+        margin: 5px 0;
     }
     .metric-card {
         background-color: #f8f9fa;
         padding: 20px;
         border-radius: 10px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        text-align: center;
     }
     .days-lost {
+        font-size: 36px;
+        font-weight: bold;
+        color: #dc3545;
+    }
+    .financial-impact {
         font-size: 36px;
         font-weight: bold;
         color: #dc3545;
@@ -70,6 +79,9 @@ st.markdown("""
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
         }
+    }
+    .stButton button {
+        width: 100%;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -91,6 +103,48 @@ with col2:
         type=["xlsx", "xls", "csv"],
         help="Upload a master list of all staff members. Should have columns: Person ID, Name, Department"
     )
+
+# ================== SIDEBAR CONFIGURATION ==================
+with st.sidebar:
+    st.markdown("### ⚙️ Configuration")
+    
+    # Daily wage input for financial calculations
+    avg_daily_wage = st.number_input(
+        "💰 Average Daily Wage ($)",
+        min_value=0,
+        value=100,
+        step=10,
+        help="Used to calculate financial impact of absenteeism"
+    )
+    
+    # Work days configuration
+    st.markdown("#### 📅 Work Week Configuration")
+    work_days_per_week = st.number_input(
+        "Work Days per Week",
+        min_value=1,
+        max_value=7,
+        value=5,
+        help="Number of working days in a week"
+    )
+    
+    work_days_per_month = st.number_input(
+        "Work Days per Month",
+        min_value=1,
+        max_value=31,
+        value=22,
+        help="Average number of working days in a month"
+    )
+    
+    st.markdown("---")
+    st.markdown("### 📊 Dashboard Info")
+    st.markdown("""
+    **Features:**
+    - 📈 Days Lost Tracking
+    - 🟢 Attendance Categories
+    - 👥 Staff Comparison
+    - 📊 Visual Analytics
+    - 📤 Export Reports
+    """)
 
 # ================== FUNCTIONS ==================
 def process_excel_file(file, file_name=""):
@@ -135,7 +189,7 @@ def process_excel_file(file, file_name=""):
         # Add week number and week identifier
         df["week_num"] = df["date"].dt.isocalendar().week
         df["week_year"] = df["date"].dt.isocalendar().year
-        df["week_identifier"] = df["week_year"].astype(str) + "-W" + df["week_num"].astype(str)
+        df["week_identifier"] = df["week_year"].astype(str) + "-W" + df["week_num"].astype(str).str.zfill(2)
         
         # Add month and year for time period tracking
         df["month"] = df["date"].dt.month
@@ -167,7 +221,6 @@ def process_staff_list(file):
         df.columns = [col.lower().strip().replace(' ', '_') for col in df.columns]
         
         # Check for required columns
-        required_cols = ['name']
         if 'person_id' not in df.columns and 'id' in df.columns:
             df = df.rename(columns={'id': 'person_id'})
         if 'department' not in df.columns and 'dept' in df.columns:
@@ -214,7 +267,7 @@ def combine_all_files(uploaded_files):
     else:
         return pd.DataFrame(), file_names
 
-def calculate_absenteeism(df, staff_list_df=None, period_days=None):
+def calculate_absenteeism(df, staff_list_df=None, period_days=None, avg_daily_wage=100):
     """Calculate days lost due to absenteeism"""
     if df.empty:
         return {
@@ -222,7 +275,11 @@ def calculate_absenteeism(df, staff_list_df=None, period_days=None):
             "avg_days_lost_per_staff": 0,
             "absenteeism_rate": 0,
             "financial_impact": 0,
-            "productivity_loss": 0
+            "productivity_loss": 0,
+            "total_possible_days": 0,
+            "total_actual_signins": 0,
+            "period_days": 0,
+            "total_staff": 0
         }
     
     # Get total unique dates in the period
@@ -250,8 +307,7 @@ def calculate_absenteeism(df, staff_list_df=None, period_days=None):
     # Calculate absenteeism rate
     absenteeism_rate = round((total_days_lost / total_possible_days) * 100, 1) if total_possible_days > 0 else 0
     
-    # Estimate financial impact (assuming average daily wage - you can customize this)
-    avg_daily_wage = st.sidebar.number_input("💰 Average Daily Wage ($)", min_value=0, value=100, step=10)
+    # Estimate financial impact
     financial_impact = total_days_lost * avg_daily_wage
     
     # Estimate productivity loss (as percentage)
@@ -281,7 +337,7 @@ def categorize_attendance(attendance_rate):
 def compare_staff_lists(attendance_df, staff_list_df):
     """Compare attendance data with master staff list to identify non-attending staff"""
     if attendance_df.empty or staff_list_df.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0
     
     # Clean names for comparison (uppercase and strip)
     attendance_df['name_clean'] = attendance_df['name'].astype(str).str.strip().str.upper()
@@ -315,8 +371,7 @@ def compare_staff_lists(attendance_df, staff_list_df):
         attendance_df.groupby('name_clean').agg({
             'sign_in_time': 'count',
             'on_time': 'sum',
-            'late': 'sum',
-            'date': lambda x: list(x.dt.date.unique())
+            'late': 'sum'
         }).reset_index(),
         on='name_clean',
         how='left'
@@ -326,8 +381,7 @@ def compare_staff_lists(attendance_df, staff_list_df):
     merged_df = merged_df.rename(columns={
         'sign_in_time': 'total_days',
         'on_time': 'on_time_days',
-        'late': 'late_days',
-        'date': 'attendance_dates'
+        'late': 'late_days'
     })
     
     # Fill NaN values for non-attending staff
@@ -352,12 +406,7 @@ def compare_staff_lists(attendance_df, staff_list_df):
         lambda x: 'Excellent' if x >= 95 else ('Needs Monitoring' if x >= 85 else 'Intervention Required')
     )
     
-    # Add color-coded category
-    merged_df[['attendance_status', 'status_class']] = merged_df['attendance_rate'].apply(
-        lambda x: pd.Series(categorize_attendance(x))
-    )
-    
-    # Add attendance status (Regular/Occasional/Non-Attending)
+    # Add attendance status type
     merged_df['attendance_status_type'] = merged_df['total_days'].apply(
         lambda x: 'Regular' if x >= 3 else ('Occasional' if x > 0 else 'Non-Attending')
     )
@@ -431,7 +480,7 @@ def calculate_kpis(df, staff_list_df=None):
     kpis = {
         "total_staff": attending_staff_count,
         "present_today": present_today,
-        "absent_today": 0,  # Will be calculated below if staff list is provided
+        "absent_today": 0,
         "avg_signins": avg_signins,
         "today": today,
         "total_on_time": total_on_time,
@@ -477,7 +526,7 @@ def create_attendance_leaderboard(merged_df):
     display_cols = [
         "rank", "name", "department", "total_days", "days_lost",
         "attendance_rate", "on_time_percentage", "on_time_days", 
-        "late_days", "attendance_status", "attendance_status_type"
+        "late_days", "attendance_category", "attendance_status_type"
     ]
     
     # Only include columns that exist
@@ -514,8 +563,9 @@ def create_time_period_report(df, period_type="week"):
     
     # Calculate attendance rate and days lost for the period
     if len(df['name'].unique()) > 0:
-        period_stats["Attendance Rate %"] = round((period_stats["Unique Staff"] / df['name'].nunique()) * 100, 1)
-        period_stats["Days Lost"] = (df['name'].nunique() * period_stats["Unique Staff"].count()) - period_stats["Total Sign-Ins"]
+        total_staff = df['name'].nunique()
+        period_stats["Attendance Rate %"] = round((period_stats["Unique Staff"] / total_staff) * 100, 1)
+        period_stats["Days Lost"] = (total_staff * len(period_stats)) - period_stats["Total Sign-Ins"]
     
     # Sort by period
     if period_type == "week":
@@ -570,7 +620,7 @@ def create_visual_analytics(df, leaderboard):
             height=400
         )
     
-    if not leaderboard.empty:
+    if not leaderboard.empty and 'attendance_status_type' in leaderboard.columns:
         # 2. Attendance Rate Distribution
         fig2 = go.Figure()
         
@@ -596,34 +646,35 @@ def create_visual_analytics(df, leaderboard):
         )
         
         # 3. Days Lost Distribution
-        fig3 = go.Figure()
-        
-        # Create histogram of days lost
-        fig3.add_trace(go.Histogram(
-            x=leaderboard['days_lost'],
-            nbinsx=20,
-            marker_color='#dc3545',
-            opacity=0.7,
-            name='Days Lost'
-        ))
-        
-        fig3.update_layout(
-            title='Distribution of Days Lost per Staff',
-            xaxis_title='Days Lost',
-            yaxis_title='Number of Staff',
-            height=400,
-            bargap=0.1
-        )
-        
-        # Add vertical line for average
-        avg_days_lost = leaderboard['days_lost'].mean()
-        fig3.add_vline(
-            x=avg_days_lost, 
-            line_dash="dash", 
-            line_color="blue",
-            annotation_text=f"Avg: {avg_days_lost:.1f}",
-            annotation_position="top"
-        )
+        if 'days_lost' in leaderboard.columns:
+            fig3 = go.Figure()
+            
+            # Create histogram of days lost
+            fig3.add_trace(go.Histogram(
+                x=leaderboard['days_lost'],
+                nbinsx=20,
+                marker_color='#dc3545',
+                opacity=0.7,
+                name='Days Lost'
+            ))
+            
+            fig3.update_layout(
+                title='Distribution of Days Lost per Staff',
+                xaxis_title='Days Lost',
+                yaxis_title='Number of Staff',
+                height=400,
+                bargap=0.1
+            )
+            
+            # Add vertical line for average
+            avg_days_lost = leaderboard['days_lost'].mean()
+            fig3.add_vline(
+                x=avg_days_lost, 
+                line_dash="dash", 
+                line_color="blue",
+                annotation_text=f"Avg: {avg_days_lost:.1f}",
+                annotation_position="top"
+            )
     
     return fig1, fig2, fig3
 
@@ -658,7 +709,7 @@ if uploaded_files:
         kpis = calculate_kpis(df, staff_list_df)
         
         # Calculate absenteeism metrics
-        absenteeism = calculate_absenteeism(df, staff_list_df, kpis['total_days_covered'])
+        absenteeism = calculate_absenteeism(df, staff_list_df, kpis['total_days_covered'], avg_daily_wage)
         
         # ================== DAYS LOST & ABSENTEEISM SECTION ==================
         st.markdown("---")
@@ -667,45 +718,46 @@ if uploaded_files:
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.markdown("""
+            st.markdown(f"""
             <div class="metric-card">
                 <h4>Total Days Lost</h4>
-                <div class="days-lost">{:,}</div>
-                <small>out of {:,} possible days</small>
+                <div class="days-lost">{absenteeism['total_days_lost']:,}</div>
+                <small>out of {absenteeism['total_possible_days']:,} possible days</small>
             </div>
-            """.format(absenteeism['total_days_lost'], absenteeism['total_possible_days']), unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
         
         with col2:
-            st.markdown("""
+            st.markdown(f"""
             <div class="metric-card">
                 <h4>Absenteeism Rate</h4>
-                <div class="days-lost">{:.1f}%</div>
-                <small>{:.1f} days lost per staff</small>
+                <div class="days-lost">{absenteeism['absenteeism_rate']:.1f}%</div>
+                <small>{absenteeism['avg_days_lost_per_staff']:.1f} days lost per staff</small>
             </div>
-            """.format(absenteeism['absenteeism_rate'], absenteeism['avg_days_lost_per_staff']), unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
         
         with col3:
-            st.markdown("""
+            st.markdown(f"""
             <div class="metric-card">
                 <h4>Financial Impact</h4>
-                <div class="days-lost">${:,.0f}</div>
+                <div class="financial-impact">${absenteeism['financial_impact']:,.0f}</div>
                 <small>Estimated cost of absenteeism</small>
             </div>
-            """.format(absenteeism['financial_impact']), unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
         
         with col4:
-            st.markdown("""
+            st.markdown(f"""
             <div class="metric-card">
                 <h4>Productivity Loss</h4>
-                <div class="days-lost">{:.1f}%</div>
+                <div class="days-lost">{absenteeism['productivity_loss']:.1f}%</div>
                 <small>Estimated productivity impact</small>
             </div>
-            """.format(absenteeism['productivity_loss']), unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
         
         # ================== ATTENDANCE CATEGORIES ==================
         if not merged_df.empty:
             st.markdown("---")
             st.markdown("### 📊 Attendance Categories")
+            st.markdown("**🟢 95–100% – Excellent | 🟡 85–94% – Needs Monitoring | 🔴 Below 85% – Intervention Required**")
             
             # Calculate category counts
             category_counts = merged_df['attendance_category'].value_counts()
@@ -788,7 +840,8 @@ if uploaded_files:
                     label="Never Signed In",
                     value=non_attending_count,
                     delta=f"{non_attending_count} staff",
-                    help="Staff members who have never signed in"
+                    help="Staff members who have never signed in",
+                    delta_color="inverse" if non_attending_count > 0 else "normal"
                 )
             
             with col4:
@@ -807,10 +860,10 @@ if uploaded_files:
             
             # Display non-attending staff
             if not non_attending_staff.empty:
-                with st.expander("📋 View Staff Who Never Signed In", expanded=True):
+                with st.expander(f"📋 View Staff Who Never Signed In ({len(non_attending_staff)} staff)", expanded=True):
                     st.warning(f"⚠️ {len(non_attending_staff)} staff members have never signed in")
                     st.dataframe(
-                        non_attending_staff,
+                        non_attending_staff[['name', 'department', 'person_id']] if 'person_id' in non_attending_staff.columns else non_attending_staff,
                         use_container_width=True,
                         hide_index=True,
                         column_config={
@@ -825,14 +878,13 @@ if uploaded_files:
                     st.download_button(
                         label="📥 Download Non-Attending Staff List",
                         data=csv_data,
-                        file_name="non_attending_staff.csv",
-                        mime="text/csv",
-                        help="Download list of staff who never signed in"
+                        file_name=f"non_attending_staff_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
                     )
             
             # Display staff who signed in but not in master list
             if not attendance_only_staff.empty:
-                with st.expander("📝 View Staff Not in Master List", expanded=True):
+                with st.expander(f"📝 View Staff Not in Master List ({len(attendance_only_staff)} staff)", expanded=True):
                     st.info("These staff members signed in but are not in the master list. They may be new hires or need to be added to the master list.")
                     st.dataframe(
                         attendance_only_staff,
@@ -892,7 +944,8 @@ if uploaded_files:
                 label="Total Sign-Ins",
                 value=f"{kpis['total_signins']:,}",
                 delta=f"{kpis['total_late']:,} late",
-                help="Total number of sign-ins across all periods"
+                help="Total number of sign-ins across all periods",
+                delta_color="inverse" if kpis['total_late'] > 0 else "normal"
             )
         
         # ================== VISUAL ANALYTICS ==================
@@ -917,5 +970,331 @@ if uploaded_files:
         st.markdown("---")
         st.markdown("### 🏆 Attendance Leaderboard")
         
-        # Use merged_df if available, otherwise use attendance data
-        if not
+        # Use merged_df if available, otherwise create from attendance data
+        if not merged_df.empty:
+            leaderboard = create_attendance_leaderboard(merged_df)
+        else:
+            # Create basic leaderboard from attendance data only
+            attendance_stats = df.groupby(["name", "department"]).agg({
+                "sign_in_time": "count",
+                "on_time": "sum",
+                "late": "sum"
+            }).reset_index()
+            
+            attendance_stats.columns = ["name", "department", "total_days", "on_time_days", "late_days"]
+            attendance_stats["on_time_percentage"] = round(
+                (attendance_stats["on_time_days"] / attendance_stats["total_days"]) * 100, 1
+            )
+            
+            # Calculate days lost
+            period_days = df['date'].dt.date.nunique()
+            attendance_stats["days_lost"] = period_days - attendance_stats["total_days"]
+            attendance_stats["attendance_rate"] = round((attendance_stats["total_days"] / period_days) * 100, 1)
+            
+            attendance_stats["attendance_category"] = attendance_stats["attendance_rate"].apply(
+                lambda x: 'Excellent' if x >= 95 else ('Needs Monitoring' if x >= 85 else 'Intervention Required')
+            )
+            
+            attendance_stats["attendance_status_type"] = attendance_stats["total_days"].apply(
+                lambda x: 'Regular' if x >= 3 else ('Occasional' if x > 0 else 'Non-Attending')
+            )
+            
+            leaderboard = attendance_stats.sort_values("total_days", ascending=False).reset_index(drop=True)
+            leaderboard.insert(0, "rank", range(1, len(leaderboard) + 1))
+        
+        if not leaderboard.empty:
+            # Configure column display
+            column_config = {
+                "rank": st.column_config.NumberColumn("Rank", width="small"),
+                "name": st.column_config.TextColumn("Employee Name", width="medium"),
+                "department": st.column_config.TextColumn("Department", width="medium"),
+                "total_days": st.column_config.NumberColumn("Days Attended", width="small"),
+                "days_lost": st.column_config.NumberColumn("Days Lost", width="small"),
+                "attendance_rate": st.column_config.ProgressColumn(
+                    "Attendance %",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=100,
+                    width="medium"
+                ),
+                "on_time_percentage": st.column_config.ProgressColumn(
+                    "On-Time %", 
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=100,
+                    width="medium"
+                ),
+                "on_time_days": st.column_config.NumberColumn("On-Time", width="small"),
+                "late_days": st.column_config.NumberColumn("Late", width="small"),
+                "attendance_category": st.column_config.TextColumn("Category", width="medium"),
+                "attendance_status_type": st.column_config.TextColumn("Status", width="small")
+            }
+            
+            st.dataframe(
+                leaderboard,
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config
+            )
+            
+            # Add leaderboard statistics
+            st.markdown("#### 📈 Leaderboard Statistics")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                if len(leaderboard) > 0:
+                    top_performer = leaderboard.iloc[0]
+                    st.metric(
+                        "Top Performer", 
+                        top_performer["name"].split()[0] if isinstance(top_performer["name"], str) else "N/A",
+                        delta=f"{top_performer['total_days']} days",
+                        help="Staff with most days attended"
+                    )
+            
+            with col2:
+                avg_days = round(leaderboard["total_days"].mean(), 1)
+                st.metric(
+                    "Avg Days/Staff", 
+                    avg_days,
+                    help="Average number of days attended per staff member"
+                )
+            
+            with col3:
+                if "attendance_status_type" in leaderboard.columns:
+                    regular_count = len(leaderboard[leaderboard["attendance_status_type"] == "Regular"])
+                    st.metric(
+                        "Regular Attendees", 
+                        regular_count,
+                        help="Staff who attended 3+ days"
+                    )
+            
+            with col4:
+                best_punctuality = leaderboard["on_time_percentage"].max() if "on_time_percentage" in leaderboard.columns else 0
+                st.metric(
+                    "Best On-Time Rate", 
+                    f"{best_punctuality}%",
+                    help="Highest on-time percentage achieved"
+                )
+        
+        # ================== TIME PERIOD ANALYSIS ==================
+        st.markdown("---")
+        st.markdown("### 📅 Time Period Analysis")
+        
+        tab1, tab2 = st.tabs(["Weekly Analysis", "Monthly Analysis"])
+        
+        with tab1:
+            st.markdown("#### 📊 Weekly Attendance Trends")
+            weekly_report = create_time_period_report(df, period_type="week")
+            
+            if not weekly_report.empty:
+                st.dataframe(
+                    weekly_report,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Week": st.column_config.TextColumn("Week", width="small"),
+                        "Unique Staff": st.column_config.NumberColumn("Staff Count", width="small"),
+                        "Total Sign-Ins": st.column_config.NumberColumn("Total Sign-Ins", width="small"),
+                        "On-Time": st.column_config.NumberColumn("On-Time", width="small"),
+                        "Late": st.column_config.NumberColumn("Late", width="small"),
+                        "On-Time %": st.column_config.ProgressColumn(
+                            "On-Time %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100,
+                            width="medium"
+                        ),
+                        "Attendance Rate %": st.column_config.ProgressColumn(
+                            "Attendance %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100,
+                            width="medium"
+                        ),
+                        "Days Lost": st.column_config.NumberColumn("Days Lost", width="small")
+                    }
+                )
+        
+        with tab2:
+            st.markdown("#### 📊 Monthly Attendance Trends")
+            monthly_report = create_time_period_report(df, period_type="month")
+            
+            if not monthly_report.empty:
+                st.dataframe(
+                    monthly_report,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Month": st.column_config.TextColumn("Month", width="small"),
+                        "Unique Staff": st.column_config.NumberColumn("Staff Count", width="small"),
+                        "Total Sign-Ins": st.column_config.NumberColumn("Total Sign-Ins", width="small"),
+                        "On-Time": st.column_config.NumberColumn("On-Time", width="small"),
+                        "Late": st.column_config.NumberColumn("Late", width="small"),
+                        "On-Time %": st.column_config.ProgressColumn(
+                            "On-Time %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100,
+                            width="medium"
+                        ),
+                        "Attendance Rate %": st.column_config.ProgressColumn(
+                            "Attendance %",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100,
+                            width="medium"
+                        ),
+                        "Days Lost": st.column_config.NumberColumn("Days Lost", width="small")
+                    }
+                )
+        
+        # ================== EXPORT SECTION ==================
+        st.markdown("---")
+        st.markdown("## 📤 Export Reports")
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Export full comparison report
+            if not merged_df.empty:
+                csv_data = merged_df.to_csv(index=False)
+                st.download_button(
+                    label="📊 Download Full Report",
+                    data=csv_data,
+                    file_name=f"attendance_full_report_{timestamp}.csv",
+                    mime="text/csv",
+                    help="Download complete attendance data with categories"
+                )
+            elif not df.empty:
+                # Create summary report from attendance data
+                summary_df = df.groupby(['name', 'department']).agg({
+                    'sign_in_time': 'count',
+                    'on_time': 'sum',
+                    'late': 'sum'
+                }).reset_index()
+                summary_df.columns = ['name', 'department', 'total_days', 'on_time_days', 'late_days']
+                summary_df['on_time_percentage'] = round((summary_df['on_time_days'] / summary_df['total_days']) * 100, 1)
+                
+                csv_data = summary_df.to_csv(index=False)
+                st.download_button(
+                    label="📊 Download Summary Report",
+                    data=csv_data,
+                    file_name=f"attendance_summary_{timestamp}.csv",
+                    mime="text/csv"
+                )
+        
+        with col2:
+            # Export leaderboard
+            if not leaderboard.empty:
+                csv_data = leaderboard.to_csv(index=False)
+                st.download_button(
+                    label="🏆 Download Leaderboard",
+                    data=csv_data,
+                    file_name=f"attendance_leaderboard_{timestamp}.csv",
+                    mime="text/csv"
+                )
+        
+        with col3:
+            # Export non-attending staff list
+            if not non_attending_staff.empty:
+                csv_data = non_attending_staff.to_csv(index=False)
+                st.download_button(
+                    label="📋 Download Non-Attending List",
+                    data=csv_data,
+                    file_name=f"non_attending_staff_{timestamp}.csv",
+                    mime="text/csv"
+                )
+            elif not staff_list_df.empty and non_attending_staff.empty:
+                st.info("✅ All staff in master list have signed in!")
+        
+        # ================== DATA SUMMARY ==================
+        st.markdown("---")
+        st.markdown("### 📋 Data Summary")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Files Processed",
+                len(file_names),
+                help="Number of attendance files processed"
+            )
+        
+        with col2:
+            if not staff_list_df.empty:
+                st.metric(
+                    "Staff Coverage",
+                    f"{kpis['attending_staff']} / {kpis['total_staff_in_list']}",
+                    help="Attending staff / Total staff in list"
+                )
+            else:
+                st.metric(
+                    "Unique Staff",
+                    kpis['total_staff'],
+                    help="Number of unique staff members"
+                )
+        
+        with col3:
+            st.metric(
+                "Total Records",
+                f"{len(df):,}",
+                help="Total number of attendance records processed"
+            )
+    
+    else:
+        st.warning("The uploaded files don't contain valid attendance data. Please check the file formats.")
+        
+else:
+    # ================== PLACEHOLDER UI ==================
+    st.info("👆 Upload attendance Excel files to begin analysis")
+    
+    # Instructions
+    with st.expander("📋 How to use this dashboard"):
+        st.markdown("""
+        ### **Dashboard Features:**
+        
+        1. **📉 Absenteeism Analysis**: Track days lost and financial impact
+        2. **🟢 Attendance Categories**: Color-coded staff performance
+        3. **👥 Staff Comparison**: Identify non-attending staff
+        4. **📊 Visual Analytics**: Interactive charts and heatmaps
+        5. **🏆 Leaderboard**: Rank staff by attendance
+        6. **📤 Export Reports**: Download data in CSV format
+        
+        ### **File Requirements:**
+        
+        **Attendance Files:**
+        - Excel files with columns: Person ID, Name, Department, Date, SIGN-IN, SIGN-OUT
+        - Date format: MM/DD/YYYY
+        - Time format: HH:MM (24-hour)
+        
+        **Staff Master List (Optional):**
+        - Excel or CSV file with columns: Name (required), Person ID, Department
+        - Helps identify staff who never sign in
+        
+        ### **Attendance Categories:**
+        - 🟢 **Excellent**: 95-100% attendance rate
+        - 🟡 **Needs Monitoring**: 85-94% attendance rate
+        - 🔴 **Intervention Required**: Below 85% attendance rate
+        """)
+    
+    # Placeholder metrics
+    st.markdown("### 📊 Attendance Overview")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    metrics = [
+        ("Total Staff", "0"),
+        ("Daily Attendance", "0%"),
+        ("On-Time Rate", "0%"),
+        ("Avg Sign-Ins", "0.0"),
+        ("Total Sign-Ins", "0")
+    ]
+    
+    for col, (label, value) in zip([col1, col2, col3, col4, col5], metrics):
+        with col:
+            st.metric(label=label, value=value)
+
+# ================== FOOTER ==================
+st.markdown("---")
+st.caption("Staff Attendance Dashboard | Upload files to analyze attendance patterns and identify improvement areas")
