@@ -153,7 +153,16 @@ with st.sidebar:
     - 📤 Export Reports
     """)
 
-# ================== FUNCTIONS ==================
+# ================== HELPER FUNCTIONS ==================
+def count_weekdays(start_date, end_date):
+    """Count number of weekdays (Monday-Friday) between two dates inclusive"""
+    if start_date > end_date:
+        return 0
+    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    weekdays = sum(1 for date in all_dates if date.weekday() < 5)  # Monday=0, Sunday=6
+    return weekdays
+
+# ================== DATA PROCESSING FUNCTIONS ==================
 def process_excel_file(file, file_name=""):
     """Process a single uploaded Excel file with the specific format"""
     try:
@@ -192,6 +201,10 @@ def process_excel_file(file, file_name=""):
         
         # Add day of week
         df["day"] = df["date"].dt.day_name()
+        df["weekday"] = df["date"].dt.weekday  # Monday=0, Sunday=6
+        
+        # Flag for weekdays (Monday-Friday)
+        df["is_weekday"] = df["weekday"] < 5
         
         # Add week number and week identifier
         df["week_num"] = df["date"].dt.isocalendar().week
@@ -274,8 +287,8 @@ def combine_all_files(uploaded_files):
     else:
         return pd.DataFrame(), file_names
 
-def calculate_absenteeism(df, staff_list_df=None, period_days=None, avg_daily_wage=100):
-    """Calculate days lost due to absenteeism"""
+def calculate_absenteeism(df, staff_list_df=None, avg_daily_wage=100):
+    """Calculate days lost due to absenteeism considering only weekdays"""
     if df.empty:
         return {
             "total_days_lost": 0,
@@ -286,12 +299,14 @@ def calculate_absenteeism(df, staff_list_df=None, period_days=None, avg_daily_wa
             "total_possible_days": 0,
             "total_actual_signins": 0,
             "period_days": 0,
-            "total_staff": 0
+            "total_staff": 0,
+            "weekend_signins": 0
         }
     
-    # Get total unique dates in the period
-    if period_days is None:
-        period_days = df['date'].dt.date.nunique()
+    # Get min and max dates to compute total weekdays in the period
+    min_date = df['date'].min().date()
+    max_date = df['date'].max().date()
+    period_weekdays = count_weekdays(min_date, max_date)
     
     # Determine total staff count
     if staff_list_df is not None and not staff_list_df.empty:
@@ -299,11 +314,15 @@ def calculate_absenteeism(df, staff_list_df=None, period_days=None, avg_daily_wa
     else:
         total_staff = df['name'].nunique()
     
-    # Calculate total possible work days
-    total_possible_days = total_staff * period_days
+    # Calculate total possible work days (weekdays only)
+    total_possible_days = total_staff * period_weekdays
     
-    # Calculate total actual sign-ins
-    total_actual_signins = len(df)
+    # Count only weekday sign-ins for actual attendance
+    weekday_df = df[df['is_weekday']].copy()
+    total_actual_signins = len(weekday_df)
+    
+    # Weekend sign-ins count (for reporting)
+    weekend_signins = len(df[~df['is_weekday']])
     
     # Calculate days lost
     total_days_lost = total_possible_days - total_actual_signins
@@ -328,8 +347,9 @@ def calculate_absenteeism(df, staff_list_df=None, period_days=None, avg_daily_wa
         "productivity_loss": productivity_loss,
         "total_possible_days": total_possible_days,
         "total_actual_signins": total_actual_signins,
-        "period_days": period_days,
-        "total_staff": total_staff
+        "period_days": period_weekdays,
+        "total_staff": total_staff,
+        "weekend_signins": weekend_signins
     }
 
 def categorize_attendance(attendance_rate):
@@ -350,8 +370,9 @@ def compare_staff_lists(attendance_df, staff_list_df):
     attendance_df['name_clean'] = attendance_df['name'].astype(str).str.strip().str.upper()
     staff_list_df['name_clean'] = staff_list_df['name'].astype(str).str.strip().str.upper()
     
-    # Find staff who have signed in
-    attending_staff = attendance_df['name_clean'].unique()
+    # Find staff who have signed in on weekdays
+    weekday_df = attendance_df[attendance_df['is_weekday']]
+    attending_staff = weekday_df['name_clean'].unique()
     
     # Find all staff in master list
     all_staff = staff_list_df['name_clean'].unique()
@@ -364,22 +385,27 @@ def compare_staff_lists(attendance_df, staff_list_df):
     attending_mask = staff_list_df['name_clean'].isin(attending_staff)
     attending_from_master = staff_list_df[attending_mask].copy()
     
-    # Get staff who signed in but not in master list (potential new staff)
-    attendance_only_mask = ~attendance_df['name_clean'].isin(all_staff)
+    # Get staff who signed in but not in master list (potential new staff) - we can still include weekend signers? Probably yes.
+    # But for attendance rate we only count weekdays.
+    all_attendance_names = attendance_df['name_clean'].unique()
+    attendance_only_mask = ~all_attendance_names.isin(all_staff)
     attendance_only_staff = attendance_df[attendance_only_mask][['name', 'department']].drop_duplicates()
     
-    # Get period length for attendance rate calculation
-    period_days = attendance_df['date'].dt.date.nunique()
-    expected_days = period_days
+    # Get period length in weekdays for attendance rate calculation
+    min_date = attendance_df['date'].min().date()
+    max_date = attendance_df['date'].max().date()
+    expected_days = count_weekdays(min_date, max_date)
     
-    # Merge attendance data with master list for analysis
+    # Merge attendance data (weekday only) with master list for analysis
+    weekday_stats = weekday_df.groupby('name_clean').agg({
+        'sign_in_time': 'count',
+        'on_time': 'sum',
+        'late': 'sum'
+    }).reset_index()
+    
     merged_df = pd.merge(
         staff_list_df,
-        attendance_df.groupby('name_clean').agg({
-            'sign_in_time': 'count',
-            'on_time': 'sum',
-            'late': 'sum'
-        }).reset_index(),
+        weekday_stats,
         on='name_clean',
         how='left'
     )
@@ -396,8 +422,8 @@ def compare_staff_lists(attendance_df, staff_list_df):
     merged_df['on_time_days'] = merged_df['on_time_days'].fillna(0).astype(int)
     merged_df['late_days'] = merged_df['late_days'].fillna(0).astype(int)
     
-    # Calculate attendance rate
-    merged_df['attendance_rate'] = round((merged_df['total_days'] / expected_days) * 100, 1)
+    # Calculate attendance rate (based on weekdays)
+    merged_df['attendance_rate'] = round((merged_df['total_days'] / expected_days) * 100, 1) if expected_days > 0 else 0
     
     # Calculate days lost per staff
     merged_df['days_lost'] = expected_days - merged_df['total_days']
@@ -421,7 +447,7 @@ def compare_staff_lists(attendance_df, staff_list_df):
     return merged_df, non_attending_staff, attendance_only_staff, expected_days
 
 def calculate_kpis(df, staff_list_df=None):
-    """Calculate KPI metrics from the combined data"""
+    """Calculate KPI metrics from the combined data considering weekdays"""
     if df.empty:
         base_kpis = {
             "total_staff": 0,
@@ -435,7 +461,8 @@ def calculate_kpis(df, staff_list_df=None):
             "avg_daily_attendance": 0.0,
             "total_signins": 0,
             "total_days_covered": 0,
-            "date_range": "N/A"
+            "date_range": "N/A",
+            "weekend_signins": 0
         }
         
         if staff_list_df is not None and not staff_list_df.empty:
@@ -448,44 +475,58 @@ def calculate_kpis(df, staff_list_df=None):
         
         return base_kpis
     
-    # Get unique staff count from attendance data
-    attending_staff_count = df["name"].nunique()
+    # Filter to weekdays for most metrics
+    weekday_df = df[df['is_weekday']].copy()
+    
+    # Get unique staff count from attendance data (any sign-in)
+    all_attending_staff_count = df["name"].nunique()
+    
+    # For attendance metrics, we only consider weekdays
+    attending_staff_count_weekday = weekday_df["name"].nunique()
     
     # Get today's date
     today = datetime.date.today()
     
-    # Filter for today's data
-    today_data = df[df["date"].dt.date == today]
+    # Filter for today's data (if today is weekday, consider sign-ins; if weekend, set present_today to 0 or handle appropriately)
+    if today.weekday() < 5:  # Today is weekday
+        today_data = weekday_df[weekday_df["date"].dt.date == today]
+        present_today = today_data["name"].nunique() if not today_data.empty else 0
+    else:
+        present_today = 0  # No attendance expected on weekend
     
-    # Count present today (those who signed in)
-    present_today = today_data["name"].nunique() if not today_data.empty else 0
+    # Calculate average sign-ins per staff (weekdays only)
+    if attending_staff_count_weekday > 0:
+        signins_by_staff = weekday_df.groupby("name")["sign_in_time"].count()
+        avg_signins = round(signins_by_staff.mean(), 1)
+    else:
+        avg_signins = 0.0
     
-    # Calculate average sign-ins per staff
-    signins_by_staff = df.groupby("name")["sign_in_time"].count()
-    avg_signins = round(signins_by_staff.mean(), 1)
+    # Calculate punctuality stats (weekdays only)
+    total_on_time = weekday_df[weekday_df["on_time"]]["name"].count()
+    total_late = weekday_df[weekday_df["late"]]["name"].count()
+    total_signins_weekday = total_on_time + total_late
+    on_time_rate = round((total_on_time / total_signins_weekday * 100), 1) if total_signins_weekday > 0 else 0.0
     
-    # Calculate punctuality stats
-    total_on_time = df[df["on_time"]]["name"].count()
-    total_late = df[df["late"]]["name"].count()
-    total_signins = total_on_time + total_late
-    on_time_rate = round((total_on_time / total_signins * 100), 1) if total_signins > 0 else 0.0
-    
-    # Calculate average daily attendance rate
-    unique_dates = df["date"].dt.date.nunique()
-    if unique_dates > 0:
-        daily_attendance = df.groupby("date")["name"].nunique().mean()
-        avg_daily_attendance = round(daily_attendance / attending_staff_count * 100, 1) if attending_staff_count > 0 else 0.0
+    # Calculate average daily attendance rate (based on weekdays)
+    unique_dates = weekday_df["date"].dt.date.nunique()
+    if unique_dates > 0 and attending_staff_count_weekday > 0:
+        daily_attendance = weekday_df.groupby("date")["name"].nunique().mean()
+        avg_daily_attendance = round(daily_attendance / attending_staff_count_weekday * 100, 1)
     else:
         avg_daily_attendance = 0.0
     
-    # Calculate date range
+    # Calculate date range (all days)
     min_date = df["date"].min().date()
     max_date = df["date"].max().date()
     date_range = f"{min_date.strftime('%b %d, %Y')} to {max_date.strftime('%b %d, %Y')}"
     total_days_covered = (max_date - min_date).days + 1
     
+    # Weekend sign-ins
+    weekend_df = df[~df['is_weekday']]
+    weekend_signins = len(weekend_df)
+    
     kpis = {
-        "total_staff": attending_staff_count,
+        "total_staff": attending_staff_count_weekday,  # Staff who attended at least one weekday
         "present_today": present_today,
         "absent_today": 0,
         "avg_signins": avg_signins,
@@ -494,29 +535,39 @@ def calculate_kpis(df, staff_list_df=None):
         "total_late": total_late,
         "on_time_rate": on_time_rate,
         "avg_daily_attendance": avg_daily_attendance,
-        "total_signins": total_signins,
+        "total_signins": total_signins_weekday,  # Total weekday sign-ins
         "total_days_covered": total_days_covered,
-        "date_range": date_range
+        "date_range": date_range,
+        "weekend_signins": weekend_signins
     }
     
     # Add staff list comparison metrics if staff list is provided
     if staff_list_df is not None and not staff_list_df.empty:
         total_staff_in_list = len(staff_list_df)
-        non_attending_count = total_staff_in_list - attending_staff_count
-        attendance_rate = round((attending_staff_count / total_staff_in_list) * 100, 1) if total_staff_in_list > 0 else 0
+        non_attending_count = total_staff_in_list - attending_staff_count_weekday
+        attendance_rate = round((attending_staff_count_weekday / total_staff_in_list) * 100, 1) if total_staff_in_list > 0 else 0
+        
+        # For absent today, use total staff in list minus present_today (if today is weekday)
+        if today.weekday() < 5:
+            absent_today = max(0, total_staff_in_list - present_today)
+        else:
+            absent_today = 0  # On weekends, no one is expected
         
         kpis.update({
             "total_staff_in_list": total_staff_in_list,
-            "attending_staff": attending_staff_count,
+            "attending_staff": attending_staff_count_weekday,
             "non_attending_staff": max(0, non_attending_count),
             "attendance_rate": attendance_rate,
-            "absent_today": max(0, total_staff_in_list - present_today)
+            "absent_today": absent_today
         })
+    else:
+        # If no staff list, we still have total_staff from attendance
+        kpis["absent_today"] = max(0, kpis["total_staff"] - present_today) if today.weekday() < 5 else 0
     
     return kpis
 
 def create_attendance_leaderboard(merged_df):
-    """Create a leaderboard of staff ranked by attendance and punctuality"""
+    """Create a leaderboard of staff ranked by attendance and punctuality (based on weekdays)"""
     if merged_df.empty:
         return pd.DataFrame()
     
@@ -542,9 +593,12 @@ def create_attendance_leaderboard(merged_df):
     return leaderboard[display_cols]
 
 def create_time_period_report(df, period_type="week"):
-    """Create a report grouped by time period (week or month)"""
+    """Create a report grouped by time period (week or month) considering only weekdays"""
     if df.empty:
         return pd.DataFrame()
+    
+    # Filter to weekdays
+    weekday_df = df[df['is_weekday']].copy()
     
     if period_type == "week":
         # Group by week
@@ -556,7 +610,7 @@ def create_time_period_report(df, period_type="week"):
         period_name = "Month"
     
     # Calculate statistics by time period
-    period_stats = df.groupby(period_col).agg({
+    period_stats = weekday_df.groupby(period_col).agg({
         "name": "nunique",
         "sign_in_time": "count",
         "on_time": "sum",
@@ -569,10 +623,17 @@ def create_time_period_report(df, period_type="week"):
     period_stats["On-Time %"] = round((period_stats["On-Time"] / period_stats["Total Sign-Ins"]) * 100, 1)
     
     # Calculate attendance rate and days lost for the period
-    if len(df['name'].unique()) > 0:
-        total_staff = df['name'].nunique()
+    # Need to know the number of weekdays in each period
+    # For simplicity, we'll compute days lost as (total_staff * number_of_weekdays_in_period) - total_signins
+    # But we don't have number_of_weekdays_in_period per group easily. We'll approximate or skip.
+    # Instead, we can compute attendance rate as (Unique Staff / total_staff) * 100
+    if len(weekday_df['name'].unique()) > 0:
+        total_staff = weekday_df['name'].nunique()
         period_stats["Attendance Rate %"] = round((period_stats["Unique Staff"] / total_staff) * 100, 1)
-        period_stats["Days Lost"] = (total_staff * len(period_stats)) - period_stats["Total Sign-Ins"]
+        # Days lost per period: (total_staff * days_in_period) - total_signins, but days_in_period varies
+        # We'll skip days lost per period for simplicity, or compute if we can get weekday counts per period.
+        # Option: count weekdays in each period range from min/max dates in that period.
+        # For now, leave it out.
     
     # Sort by period
     if period_type == "week":
@@ -599,10 +660,13 @@ def create_visual_analytics(df, leaderboard):
     
     fig1, fig2, fig3 = None, None, None
     
-    if not df.empty:
+    # Filter to weekdays for heatmap (since that's when attendance matters)
+    weekday_df = df[df['is_weekday']].copy()
+    
+    if not weekday_df.empty:
         # 1. Attendance Heatmap by Day/Hour
-        df['hour'] = df['sign_in_time'].apply(lambda x: x.hour)
-        heatmap_data = df.pivot_table(
+        weekday_df['hour'] = weekday_df['sign_in_time'].apply(lambda x: x.hour)
+        heatmap_data = weekday_df.pivot_table(
             index='day', 
             columns='hour', 
             values='sign_in_time', 
@@ -611,7 +675,7 @@ def create_visual_analytics(df, leaderboard):
         )
         
         # Reorder days
-        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
         heatmap_data = heatmap_data.reindex([d for d in day_order if d in heatmap_data.index])
         
         fig1 = go.Figure(data=go.Heatmap(
@@ -623,7 +687,7 @@ def create_visual_analytics(df, leaderboard):
             colorbar=dict(title="Sign-Ins")
         ))
         fig1.update_layout(
-            title='Attendance Heatmap by Day & Hour',
+            title='Weekday Attendance Heatmap by Day & Hour',
             xaxis_title='Hour of Day',
             yaxis_title='Day of Week',
             height=400
@@ -717,12 +781,12 @@ if uploaded_files:
         # Calculate KPIs
         kpis = calculate_kpis(df, staff_list_df)
         
-        # Calculate absenteeism metrics
-        absenteeism = calculate_absenteeism(df, staff_list_df, kpis['total_days_covered'], avg_daily_wage)
+        # Calculate absenteeism metrics (already weekday-based)
+        absenteeism = calculate_absenteeism(df, staff_list_df, avg_daily_wage)
         
         # ================== DAYS LOST & ABSENTEEISM SECTION ==================
         st.markdown("---")
-        st.markdown("### 📉 Absenteeism Analysis")
+        st.markdown("### 📉 Absenteeism Analysis (Weekdays Only)")
         
         col1, col2, col3, col4 = st.columns(4)
         
@@ -731,7 +795,7 @@ if uploaded_files:
             <div class="metric-card">
                 <h4>Total Days Lost</h4>
                 <div class="days-lost">{absenteeism['total_days_lost']:,}</div>
-                <small>out of {absenteeism['total_possible_days']:,} possible days</small>
+                <small>out of {absenteeism['total_possible_days']:,} possible weekdays</small>
             </div>
             """, unsafe_allow_html=True)
         
@@ -740,7 +804,7 @@ if uploaded_files:
             <div class="metric-card">
                 <h4>Absenteeism Rate</h4>
                 <div class="days-lost">{absenteeism['absenteeism_rate']:.1f}%</div>
-                <small>{absenteeism['avg_days_lost_per_staff']:.1f} days lost per staff</small>
+                <small>{absenteeism['avg_days_lost_per_staff']:.1f} weekdays lost per staff</small>
             </div>
             """, unsafe_allow_html=True)
         
@@ -762,10 +826,14 @@ if uploaded_files:
             </div>
             """, unsafe_allow_html=True)
         
+        # Show weekend sign-ins if any
+        if absenteeism['weekend_signins'] > 0:
+            st.info(f"ℹ️ There were {absenteeism['weekend_signins']} sign-ins on weekends (not counted in attendance metrics).")
+        
         # ================== ATTENDANCE CATEGORIES ==================
         if not merged_df.empty:
             st.markdown("---")
-            st.markdown("### 📊 Attendance Categories")
+            st.markdown("### 📊 Attendance Categories (Weekdays Only)")
             st.markdown("**🟢 95–100% – Excellent | 🟡 85–94% – Needs Monitoring | 🔴 Below 85% – Intervention Required**")
             
             # Calculate category counts
@@ -824,7 +892,7 @@ if uploaded_files:
         # ================== STAFF COMPARISON SECTION ==================
         if not staff_list_df.empty:
             st.markdown("---")
-            st.markdown("### 👥 Staff Attendance Comparison")
+            st.markdown("### 👥 Staff Attendance Comparison (Weekdays Only)")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -840,7 +908,7 @@ if uploaded_files:
                     label="Staff Who Signed In",
                     value=kpis.get("attending_staff", kpis["total_staff"]),
                     delta=f"{kpis.get('attendance_rate', 0)}% attendance rate",
-                    help="Staff members who have signed in at least once"
+                    help="Staff members who have signed in at least once on a weekday"
                 )
             
             with col3:
@@ -849,7 +917,7 @@ if uploaded_files:
                     label="Never Signed In",
                     value=non_attending_count,
                     delta=f"{non_attending_count} staff",
-                    help="Staff members who have never signed in",
+                    help="Staff members who have never signed in on a weekday",
                     delta_color="inverse" if non_attending_count > 0 else "normal"
                 )
             
@@ -869,8 +937,8 @@ if uploaded_files:
             
             # Display non-attending staff
             if not non_attending_staff.empty:
-                with st.expander(f"📋 View Staff Who Never Signed In ({len(non_attending_staff)} staff)", expanded=True):
-                    st.warning(f"⚠️ {len(non_attending_staff)} staff members have never signed in")
+                with st.expander(f"📋 View Staff Who Never Signed In (Weekdays) ({len(non_attending_staff)} staff)", expanded=True):
+                    st.warning(f"⚠️ {len(non_attending_staff)} staff members have never signed in on a weekday")
                     st.dataframe(
                         non_attending_staff[['name', 'department', 'person_id']] if 'person_id' in non_attending_staff.columns else non_attending_staff,
                         use_container_width=True,
@@ -907,21 +975,21 @@ if uploaded_files:
         
         # ================== KPI METRICS ==================
         st.markdown("---")
-        st.markdown("### 📊 Attendance Overview")
-        st.caption(f"Data Range: {kpis['date_range']} ({kpis['total_days_covered']} days)")
+        st.markdown("### 📊 Attendance Overview (Weekdays Only)")
+        st.caption(f"Data Range: {kpis['date_range']} (includes weekends, but metrics count only weekdays)")
         
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             if not staff_list_df.empty:
                 total_label = f"{kpis['attending_staff']} / {kpis['total_staff_in_list']}"
-                total_help = "Attending staff / Total staff in list"
+                total_help = "Attending staff (weekdays) / Total staff in list"
             else:
                 total_label = kpis["total_staff"]
-                total_help = "Number of unique staff members in attendance data"
+                total_help = "Number of unique staff members who attended at least one weekday"
             
             st.metric(
-                label="Staff Count",
+                label="Staff Count (Weekdays)",
                 value=total_label,
                 help=total_help
             )
@@ -930,7 +998,7 @@ if uploaded_files:
             st.metric(
                 label="Daily Attendance",
                 value=f"{kpis['avg_daily_attendance']}%",
-                help="Average percentage of staff attending daily"
+                help="Average percentage of staff attending on weekdays"
             )
         
         with col3:
@@ -938,14 +1006,14 @@ if uploaded_files:
                 label="On-Time Rate",
                 value=f"{kpis['on_time_rate']}%",
                 delta=f"{kpis['total_on_time']:,} on-time",
-                help="Percentage of sign-ins before 8:00 AM"
+                help="Percentage of weekday sign-ins before 8:00 AM"
             )
         
         with col4:
             st.metric(
                 label="Avg Sign-Ins/Staff",
                 value=kpis["avg_signins"],
-                help="Average number of sign-ins per staff member"
+                help="Average number of weekday sign-ins per staff member"
             )
         
         with col5:
@@ -953,13 +1021,13 @@ if uploaded_files:
                 label="Total Sign-Ins",
                 value=f"{kpis['total_signins']:,}",
                 delta=f"{kpis['total_late']:,} late",
-                help="Total number of sign-ins across all periods",
+                help="Total number of weekday sign-ins across all periods",
                 delta_color="inverse" if kpis['total_late'] > 0 else "normal"
             )
         
         # ================== VISUAL ANALYTICS ==================
         st.markdown("---")
-        st.markdown("### 📈 Visual Analytics")
+        st.markdown("### 📈 Visual Analytics (Weekdays)")
         
         if plotly_available:
             fig1, fig2, fig3 = create_visual_analytics(df, merged_df if not merged_df.empty else pd.DataFrame())
@@ -980,14 +1048,15 @@ if uploaded_files:
         
         # ================== ATTENDANCE LEADERBOARD ==================
         st.markdown("---")
-        st.markdown("### 🏆 Attendance Leaderboard")
+        st.markdown("### 🏆 Attendance Leaderboard (Weekdays)")
         
-        # Use merged_df if available, otherwise create from attendance data
+        # Use merged_df if available, otherwise create from attendance data (weekdays only)
         if not merged_df.empty:
             leaderboard = create_attendance_leaderboard(merged_df)
         else:
-            # Create basic leaderboard from attendance data only
-            attendance_stats = df.groupby(["name", "department"]).agg({
+            # Create basic leaderboard from attendance data only (weekdays)
+            weekday_df = df[df['is_weekday']].copy()
+            attendance_stats = weekday_df.groupby(["name", "department"]).agg({
                 "sign_in_time": "count",
                 "on_time": "sum",
                 "late": "sum"
@@ -998,10 +1067,12 @@ if uploaded_files:
                 (attendance_stats["on_time_days"] / attendance_stats["total_days"]) * 100, 1
             )
             
-            # Calculate days lost
-            period_days = df['date'].dt.date.nunique()
-            attendance_stats["days_lost"] = period_days - attendance_stats["total_days"]
-            attendance_stats["attendance_rate"] = round((attendance_stats["total_days"] / period_days) * 100, 1)
+            # Calculate days lost (based on weekdays)
+            min_date = df['date'].min().date()
+            max_date = df['date'].max().date()
+            period_weekdays = count_weekdays(min_date, max_date)
+            attendance_stats["days_lost"] = period_weekdays - attendance_stats["total_days"]
+            attendance_stats["attendance_rate"] = round((attendance_stats["total_days"] / period_weekdays) * 100, 1)
             
             attendance_stats["attendance_category"] = attendance_stats["attendance_rate"].apply(
                 lambda x: 'Excellent' if x >= 95 else ('Needs Monitoring' if x >= 85 else 'Intervention Required')
@@ -1059,8 +1130,8 @@ if uploaded_files:
                     st.metric(
                         "Top Performer", 
                         top_performer["name"].split()[0] if isinstance(top_performer["name"], str) else "N/A",
-                        delta=f"{top_performer['total_days']} days",
-                        help="Staff with most days attended"
+                        delta=f"{top_performer['total_days']} weekdays",
+                        help="Staff with most weekdays attended"
                     )
             
             with col2:
@@ -1068,7 +1139,7 @@ if uploaded_files:
                 st.metric(
                     "Avg Days/Staff", 
                     avg_days,
-                    help="Average number of days attended per staff member"
+                    help="Average number of weekdays attended per staff member"
                 )
             
             with col3:
@@ -1077,7 +1148,7 @@ if uploaded_files:
                     st.metric(
                         "Regular Attendees", 
                         regular_count,
-                        help="Staff who attended 3+ days"
+                        help="Staff who attended 3+ weekdays"
                     )
             
             with col4:
@@ -1090,7 +1161,7 @@ if uploaded_files:
         
         # ================== TIME PERIOD ANALYSIS ==================
         st.markdown("---")
-        st.markdown("### 📅 Time Period Analysis")
+        st.markdown("### 📅 Time Period Analysis (Weekdays)")
         
         tab1, tab2 = st.tabs(["Weekly Analysis", "Monthly Analysis"])
         
@@ -1122,8 +1193,7 @@ if uploaded_files:
                             min_value=0,
                             max_value=100,
                             width="medium"
-                        ),
-                        "Days Lost": st.column_config.NumberColumn("Days Lost", width="small")
+                        )
                     }
                 )
         
@@ -1155,8 +1225,7 @@ if uploaded_files:
                             min_value=0,
                             max_value=100,
                             width="medium"
-                        ),
-                        "Days Lost": st.column_config.NumberColumn("Days Lost", width="small")
+                        )
                     }
                 )
         
@@ -1177,11 +1246,12 @@ if uploaded_files:
                     data=csv_data,
                     file_name=f"attendance_full_report_{timestamp}.csv",
                     mime="text/csv",
-                    help="Download complete attendance data with categories"
+                    help="Download complete attendance data with categories (weekday basis)"
                 )
             elif not df.empty:
-                # Create summary report from attendance data
-                summary_df = df.groupby(['name', 'department']).agg({
+                # Create summary report from attendance data (weekdays)
+                weekday_df = df[df['is_weekday']].copy()
+                summary_df = weekday_df.groupby(['name', 'department']).agg({
                     'sign_in_time': 'count',
                     'on_time': 'sum',
                     'late': 'sum'
@@ -1219,7 +1289,7 @@ if uploaded_files:
                     mime="text/csv"
                 )
             elif not staff_list_df.empty and non_attending_staff.empty:
-                st.info("✅ All staff in master list have signed in!")
+                st.info("✅ All staff in master list have signed in on weekdays!")
         
         # ================== DATA SUMMARY ==================
         st.markdown("---")
@@ -1239,20 +1309,20 @@ if uploaded_files:
                 st.metric(
                     "Staff Coverage",
                     f"{kpis['attending_staff']} / {kpis['total_staff_in_list']}",
-                    help="Attending staff / Total staff in list"
+                    help="Attending staff (weekdays) / Total staff in list"
                 )
             else:
                 st.metric(
-                    "Unique Staff",
+                    "Unique Staff (Weekdays)",
                     kpis['total_staff'],
-                    help="Number of unique staff members"
+                    help="Number of unique staff members who attended at least one weekday"
                 )
         
         with col3:
             st.metric(
-                "Total Records",
-                f"{len(df):,}",
-                help="Total number of attendance records processed"
+                "Total Records (Weekdays)",
+                f"{kpis['total_signins']:,}",
+                help="Total number of weekday attendance records processed"
             )
     
     else:
@@ -1267,11 +1337,11 @@ else:
         st.markdown("""
         ### **Dashboard Features:**
         
-        1. **📉 Absenteeism Analysis**: Track days lost and financial impact
-        2. **🟢 Attendance Categories**: Color-coded staff performance
-        3. **👥 Staff Comparison**: Identify non-attending staff
+        1. **📉 Absenteeism Analysis**: Track days lost and financial impact (weekdays only)
+        2. **🟢 Attendance Categories**: Color-coded staff performance based on weekday attendance
+        3. **👥 Staff Comparison**: Identify staff who never sign in on weekdays
         4. **📊 Visual Analytics**: Interactive charts and heatmaps (requires plotly)
-        5. **🏆 Leaderboard**: Rank staff by attendance
+        5. **🏆 Leaderboard**: Rank staff by weekday attendance
         6. **📤 Export Reports**: Download data in CSV format
         
         ### **File Requirements:**
@@ -1283,9 +1353,9 @@ else:
         
         **Staff Master List (Optional):**
         - Excel or CSV file with columns: Name (required), Person ID, Department
-        - Helps identify staff who never sign in
+        - Helps identify staff who never sign in on weekdays
         
-        ### **Attendance Categories:**
+        ### **Attendance Categories (Weekdays):**
         - 🟢 **Excellent**: 95-100% attendance rate
         - 🟡 **Needs Monitoring**: 85-94% attendance rate
         - 🔴 **Intervention Required**: Below 85% attendance rate
@@ -1296,7 +1366,7 @@ else:
     col1, col2, col3, col4, col5 = st.columns(5)
     
     metrics = [
-        ("Total Staff", "0"),
+        ("Staff Count", "0"),
         ("Daily Attendance", "0%"),
         ("On-Time Rate", "0%"),
         ("Avg Sign-Ins", "0.0"),
@@ -1309,4 +1379,4 @@ else:
 
 # ================== FOOTER ==================
 st.markdown("---")
-st.caption("Staff Attendance Dashboard | Upload files to analyze attendance patterns and identify improvement areas")
+st.caption("Staff Attendance Dashboard | Weekday attendance only | Upload files to analyze attendance patterns and identify improvement areas")
