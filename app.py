@@ -5,8 +5,15 @@ import datetime
 from io import BytesIO
 from datetime import time
 import zipfile
-import plotly.graph_objects as go
-import plotly.express as px
+
+# Try importing plotly for visualizations, gracefully handle if not available
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    plotly_available = True
+except ImportError:
+    plotly_available = False
+    st.warning("⚠️ Plotly not installed. Visual charts will be disabled. To enable charts, run: pip install plotly")
 
 # ================== CONFIG ==================
 st.set_page_config(
@@ -142,7 +149,7 @@ with st.sidebar:
     - 📈 Days Lost Tracking
     - 🟢 Attendance Categories
     - 👥 Staff Comparison
-    - 📊 Visual Analytics
+    - 📊 Visual Analytics (requires plotly)
     - 📤 Export Reports
     """)
 
@@ -586,7 +593,9 @@ def create_time_period_report(df, period_type="week"):
     return period_stats
 
 def create_visual_analytics(df, leaderboard):
-    """Create interactive visual analytics"""
+    """Create interactive visual analytics (requires plotly)"""
+    if not plotly_available:
+        return None, None, None
     
     fig1, fig2, fig3 = None, None, None
     
@@ -952,19 +961,22 @@ if uploaded_files:
         st.markdown("---")
         st.markdown("### 📈 Visual Analytics")
         
-        fig1, fig2, fig3 = create_visual_analytics(df, merged_df if not merged_df.empty else pd.DataFrame())
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if fig1:
-                st.plotly_chart(fig1, use_container_width=True)
-            if fig2:
-                st.plotly_chart(fig2, use_container_width=True)
-        
-        with col2:
-            if fig3:
-                st.plotly_chart(fig3, use_container_width=True)
+        if plotly_available:
+            fig1, fig2, fig3 = create_visual_analytics(df, merged_df if not merged_df.empty else pd.DataFrame())
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if fig1:
+                    st.plotly_chart(fig1, use_container_width=True)
+                if fig2:
+                    st.plotly_chart(fig2, use_container_width=True)
+            
+            with col2:
+                if fig3:
+                    st.plotly_chart(fig3, use_container_width=True)
+        else:
+            st.info("📊 Install plotly to see interactive charts: `pip install plotly`")
         
         # ================== ATTENDANCE LEADERBOARD ==================
         st.markdown("---")
@@ -1258,7 +1270,7 @@ else:
         1. **📉 Absenteeism Analysis**: Track days lost and financial impact
         2. **🟢 Attendance Categories**: Color-coded staff performance
         3. **👥 Staff Comparison**: Identify non-attending staff
-        4. **📊 Visual Analytics**: Interactive charts and heatmaps
+        4. **📊 Visual Analytics**: Interactive charts and heatmaps (requires plotly)
         5. **🏆 Leaderboard**: Rank staff by attendance
         6. **📤 Export Reports**: Download data in CSV format
         
