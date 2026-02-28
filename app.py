@@ -622,7 +622,7 @@ def create_time_period_report(df, period_type="week"):
     # Calculate percentages
     period_stats["On-Time %"] = round((period_stats["On-Time"] / period_stats["Total Sign-Ins"]) * 100, 1)
     
-    # Calculate attendance rate and days lost for the period
+    # Calculate attendance rate for the period
     if len(weekday_df['name'].unique()) > 0:
         total_staff = weekday_df['name'].nunique()
         period_stats["Attendance Rate %"] = round((period_stats["Unique Staff"] / total_staff) * 100, 1)
