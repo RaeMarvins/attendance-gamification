@@ -1372,3 +1372,4 @@ else:
 # ================== FOOTER ==================
 st.markdown("---")
 st.caption("Staff Attendance Dashboard | Weekday attendance only | Upload files to analyze attendance patterns and identify improvement areas")
+
